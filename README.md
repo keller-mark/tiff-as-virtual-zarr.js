@@ -30,6 +30,7 @@ This key identifies a particular tile in the multidimensional array representing
 - https://github.com/cgohlke/tifffile/blob/976465b328f7724041b230917f65ca29a3e2294b/tifffile/zarr.py#L235
 - https://github.com/zarr-developers/VirtualiZarr
 - https://github.com/virtual-zarr/virtual-tiff and [#32](https://github.com/virtual-zarr/virtual-tiff/issues/32)
+- https://github.com/pymmcore-plus/ome-writers
 
 
 -----
