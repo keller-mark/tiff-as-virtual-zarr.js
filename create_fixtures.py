@@ -1,11 +1,10 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.12"
 # dependencies = [
-#     "numpy>=1.21.2",
-#     'zarr>=2.5.0,<3',
-#     'numcodecs>=0.5.7,<0.16.0',
-#     'ome-zarr<0.10.3',
-#     'tifffile>=2020.10.1',
+#     "numpy",
+#     "zarr>=3.0.0",
+#     'ome-zarr==0.13.0',
+#     'tifffile>=2026.1.28',
 # ]
 # ///
 """
@@ -18,13 +17,82 @@ import numpy as np
 import zarr
 from ome_zarr.writer import write_image
 from tifffile import TiffWriter
+from os.path import join
+
+DATA_DIR = "data"
 
 
 def make_toy_image(num_channels=3, height=128, width=128, dtype="uint8"):
-    """Create a toy CYX image array with gradient patterns per channel."""
-    rng = np.random.default_rng(42)
-    img = rng.integers(0, 255, size=(num_channels, height, width), dtype=np.uint8)
-    return img.astype(dtype)
+    """Create a toy CYX image array with geometric calibration patterns.
+
+    Every channel gets:
+      - A 1-px border around the full extent of the image.
+      - Cross-hairs through the centre.
+      - A circle inscribed in the shorter dimension (becomes an ellipse if
+        the aspect ratio is wrong).
+      - Grid lines every 1/4 of each dimension.
+
+    Each channel also receives a unique background fill so channels remain
+    visually distinguishable.
+    """
+    max_val = np.iinfo(dtype).max
+    img = np.zeros((num_channels, height, width), dtype=dtype)
+
+    # Pixel coordinate grids
+    ys = np.arange(height)
+    xs = np.arange(width)
+    yy, xx = np.meshgrid(ys, xs, indexing="ij")
+
+    # --- shared calibration overlay (boolean mask) ---
+    line_w = max(1, min(height, width) // 128)  # thin but visible
+
+    # 1-px border
+    border = (
+        (yy < line_w) | (yy >= height - line_w) |
+        (xx < line_w) | (xx >= width - line_w)
+    )
+
+    # Cross-hairs through the centre
+    cy, cx = height // 2, width // 2
+    crosshair = (
+        (np.abs(yy - cy) < line_w) |
+        (np.abs(xx - cx) < line_w)
+    )
+
+    # Grid lines at every 1/4 of each dimension
+    grid = np.zeros_like(border)
+    for frac in (0.25, 0.5, 0.75):
+        grid |= np.abs(yy - int(frac * height)) < line_w
+        grid |= np.abs(xx - int(frac * width)) < line_w
+
+    # Circle inscribed in the shorter dimension
+    radius = min(height, width) / 2 - 2 * line_w
+    dist = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    circle = np.abs(dist - radius) < line_w
+
+    overlay = border | crosshair | grid | circle
+
+    # --- per-channel background fills (normalised to [0, 1]) ---
+    xn = xx / max(width - 1, 1)   # [0, 1]
+    yn = yy / max(height - 1, 1)  # [0, 1]
+
+    backgrounds = [
+        xn,                         # horizontal gradient
+        yn,                         # vertical gradient
+        (xn + yn) / 2,             # diagonal gradient
+        1 - np.sqrt((xn - 0.5) ** 2 + (yn - 0.5) ** 2) / np.sqrt(0.5),
+        (((xn * 8).astype(int) ^ (yn * 8).astype(int)) & 1).astype(float),
+    ]
+
+    fg = 1.0   # overlay drawn at full brightness
+    bg_scale = 0.35  # dim the background so the overlay stands out
+
+    for c in range(num_channels):
+        bg = np.clip(backgrounds[c % len(backgrounds)], 0, 1) * bg_scale
+        combined = np.where(overlay, fg, bg)
+        img[c] = (combined * max_val).astype(dtype)
+
+    return img
 
 
 def write_ome_tiff(img_arr, channel_names, output_path, axes="CYX"):
@@ -80,8 +148,8 @@ def main():
     img = make_toy_image(num_channels=len(channel_names))
     print(f"Created toy image: shape={img.shape}, dtype={img.dtype}")
 
-    write_ome_tiff(img, channel_names, "test_image.ome.tif")
-    write_ome_zarr(img, channel_names, "test_image.ome.zarr")
+    write_ome_tiff(img, channel_names, join(DATA_DIR, "test_image.ome.tif"))
+    write_ome_zarr(img, channel_names, join(DATA_DIR, "test_image.ome.zarr"))
 
 
 if __name__ == "__main__":
