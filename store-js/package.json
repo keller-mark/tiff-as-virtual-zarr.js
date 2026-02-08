@@ -1,0 +1,22 @@
+{
+  "name": "tiff-as-virtual-zarr",
+  "version": "0.0.1",
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "bundle": "pnpm exec vite build -c ../../scripts/vite.config.mjs",
+    "test": "pnpm exec vitest --run"
+  },
+  "dependencies": {
+    "zarrita": "^0.6.1",
+    "@zarrita/storage": "^0.1.4",
+    "geotiff": "^2.0.5",
+    "lzw-tiff-decoder": "^0.1.1"
+  }
+}

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "store_python"
+version = "0.0.1"
+authors = [
+ "Mark"
+]
+description = "Read OME-TIFF files as virtual OME-Zarr stores."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy",
+  "zarr>=3.0.0",
+  'ome-zarr==0.13.0',
+  'tifffile>=2026.1.28',
+]
+
+[project.optional-dependencies]
+dev = [
+  'pytest>=8.4.1',
+]
