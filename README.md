@@ -11,6 +11,14 @@ We will write tests using Pytest to verify the equivalence of the generated OME-
 
 Then, we will implement a reader via Rust and Zarrs, with unit tests using Cargo test.
 
+
+TODO:
+- In JS unit tests, compare TIFF store to reference Zarr store
+- Modify the API so that it takes a Zarr store with the OME-TIFF as the root "directory" e.g., `new TiffAsZarrStore(new FetchStore('https://example.com/my_image.ome.tif'))`
+- Support non-OME TIFFs, using TIFF tags to infer dimensions and channels, and generating OME-Zarr metadata accordingly. This would be a more general "TIFF as virtual Zarr" store, with OME-TIFF as a special case with richer metadata.
+- Test with more complex fixtures, e.g., with different dimension orderings, both RGB and grayscale, both pyramidal/non-pyramidal, different compression and chunking schemes, and non-OME TIFFs.
+- Add Rust implementation of a store, using traits from the `zarrs` crate. Use `async-tiff` crate to read TIFF metadata and byte ranges. Use `zarrs` traits to implement the store API. Write unit tests using Cargo test.
+
 ## Virtual tiff-to-zarr mapping
 
 ### `/.zattrs` (Zarr v2) or `/zarr.json` (Zarr v3) attrs for root of dataframe

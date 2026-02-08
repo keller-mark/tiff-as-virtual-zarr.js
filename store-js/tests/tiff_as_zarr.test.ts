@@ -9,6 +9,8 @@ const TIFF_PATH = resolve(DATA_DIR, "test_image.ome.tif");
 
 let store: TiffAsZarrStore;
 
+// TODO: compare against reference JSON-ified ome-zarr store produced by https://github.com/hms-dbmi/viv/blob/main/scripts/directory-to-memory-store.mjs
+
 beforeAll(async () => {
 	store = await TiffAsZarrStore.fromFile(TIFF_PATH);
 });
