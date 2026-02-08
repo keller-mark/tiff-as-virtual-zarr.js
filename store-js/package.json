@@ -4,7 +4,7 @@
   "author": "",
   "license": "MIT",
   "type": "module",
-  "main": "index.js",
+  "main": "index.ts",
   "files": [
     "src",
     "dist"
@@ -20,6 +20,7 @@
     "lzw-tiff-decoder": "^0.1.1"
   },
   "devDependencies": {
+    "typescript": "^5.9.3",
     "vitest": "^4.0.18",
     "vite": "^7.3.1"
   }
