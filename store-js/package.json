@@ -18,5 +18,9 @@
     "@zarrita/storage": "^0.1.4",
     "geotiff": "^2.0.5",
     "lzw-tiff-decoder": "^0.1.1"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18",
+    "vite": "^7.3.1"
   }
 }

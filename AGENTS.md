@@ -5,3 +5,5 @@ For your reference, this repository contains the following as git submodules:
 - zarrita.js: Zarr implementation in TypeScript/JavaScript.
 - zarr-python: Zarr implementation in Python.
 - yaozarrs: OME-Zarr metadata schema validation in Pydantic (Python).
+
+The Python and JS implementations are located in the `store-python` and `store-js` directories, respectively.
