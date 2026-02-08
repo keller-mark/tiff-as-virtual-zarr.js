@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "store_python"
 version = "0.0.1"
 authors = [
- "Mark"
+ { name = "Mark" },
 ]
 description = "Read OME-TIFF files as virtual OME-Zarr stores."
 readme = "README.md"
@@ -23,7 +23,11 @@ dependencies = [
   'tifffile>=2026.1.28',
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
 [project.optional-dependencies]
 dev = [
   'pytest>=8.4.1',
+  'pytest-asyncio>=0.25.0',
 ]
