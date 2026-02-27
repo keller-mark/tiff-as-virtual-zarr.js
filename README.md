@@ -39,6 +39,7 @@ This key identifies a particular tile in the multidimensional array representing
 - https://github.com/zarr-developers/VirtualiZarr
 - https://github.com/virtual-zarr/virtual-tiff and [#32](https://github.com/virtual-zarr/virtual-tiff/issues/32)
 - https://github.com/pymmcore-plus/ome-writers
+  - https://github.com/tlambert03/ome-writers/blob/6f14f841700a0586f57e9e518123baa4756a497b/src/ome_writers/_backends/_live_tiff_store.py
 
 
 -----
