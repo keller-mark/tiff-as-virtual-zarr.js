@@ -7,9 +7,3 @@
 [submodule "zod-ome-ngff"]
 	path = zod-ome-ngff
 	url = https://github.com/hms-dbmi/zod-ome-ngff
-[submodule "zarr-python"]
-	path = zarr-python
-	url = https://github.com/zarr-developers/zarr-python
-[submodule "yaozarrs"]
-	path = yaozarrs
-	url = https://github.com/tlambert03/yaozarrs

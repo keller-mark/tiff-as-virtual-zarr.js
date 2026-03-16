@@ -1,11 +1,11 @@
-# tiff-as-virtual-zarr
+# tiff-as-virtual-zarr.js
 
 This is an effort to read and write OME-TIFF data via the Zarr store interface.
 In other words, given an OME-TIFF file, we want to conceptually/virtually mapping OME-TIFF tiles and resolutions to Zarr chunks and OME-Zarr multiscales.
 In particular, we can translate OME-XML metadata to OME-NGFF metadata.
 
 
-As a proof-of-concept, we will first implement the data generation / conversion from OME-TIFF to OME-Zarr using Python.
+We will first implement the data generation / conversion from OME-TIFF to OME-Zarr using Python.
 We will write tests using Pytest to verify the equivalence of the generated OME-Zarr data and metadata to the original OME-TIFF data.
 
 
