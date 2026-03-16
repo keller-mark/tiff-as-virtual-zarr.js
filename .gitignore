@@ -2,3 +2,8 @@ data/
 __pycache__/
 node_modules/
 dist/
+memory/
+fixtures/*.zarr
+fixtures/*.tif
+fixtures/*.tiff
+.DS_Store
