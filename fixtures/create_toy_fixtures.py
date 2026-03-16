@@ -19,7 +19,7 @@ from ome_zarr.writer import write_image
 from tifffile import TiffWriter
 from os.path import join
 
-DATA_DIR = "data"
+DATA_DIR = "."
 
 
 def make_toy_image(num_channels=3, height=128, width=128, dtype="uint8"):
