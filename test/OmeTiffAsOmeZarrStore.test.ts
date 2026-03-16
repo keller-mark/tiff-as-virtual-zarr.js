@@ -52,6 +52,15 @@ describe('OmeTiffAsOmeZarrStore – 9836842 v0.3 (CYX uint16)', () => {
     const tiffData = await zarrGet(tiffArr, [0, slice(0, 256), slice(0, 256)]);
     const refData = await zarrGet(refArr, [0, slice(0, 256), slice(0, 256)]);
     expect(tiffData.data).toEqual(refData.data);
+    
+    expect(tiffArr.attrs).toEqual(refArr.attrs);
+    // attrs.version will be different since the virtualized store upgrades the metadata.
+    delete refGroup.attrs['version'];
+    delete tiffGroup.attrs['version'];
+    expect(tiffGroup.attrs).toEqual({
+      ome: refGroup.attrs
+    });
+    
   });
 
   it('scale-0 pixel values match reference zarr for channel 1', async () => {
@@ -123,6 +132,9 @@ describe('OmeTiffAsOmeZarrStore – ExpD_chicken_embryo_MIP v0.5 (YX uint8)', ()
     const tiffArr = await open(tiffGroup.resolve('0'), { kind: 'array' });
     const refArr = await open(refGroup.resolve('0'), { kind: 'array' });
     expect(tiffArr.shape).toEqual(refArr.shape);
+
+    expect(tiffArr.attrs).toEqual(refArr.attrs);
+    expect(tiffGroup.attrs).toEqual(refGroup.attrs);
   });
 
   it('scale-0 pixel values match reference zarr', async () => {
@@ -170,6 +182,15 @@ describe('OmeTiffAsOmeZarrStore – 10501752 v0.4 (CYX float64)', () => {
     const tiffArr = await open(tiffGroup.resolve('0'), { kind: 'array' });
     const refArr = await open(refGroup.resolve('0'), { kind: 'array' });
     expect(tiffArr.shape).toEqual(refArr.shape);
+
+    expect(tiffArr.attrs).toEqual(refArr.attrs);
+    // attrs.version will be different since the virtualized store upgrades the metadata.
+    delete refGroup.attrs['version'];
+    delete tiffGroup.attrs['version'];
+    delete refGroup.attrs['_creator'];
+    expect(tiffGroup.attrs).toEqual({
+      ome: refGroup.attrs
+    });
   });
 
   it('scale-0 pixel values match reference zarr for channel 0', async () => {

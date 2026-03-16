@@ -17,7 +17,8 @@
     "zarrita": "^0.6.1",
     "@zarrita/storage": "^0.1.4",
     "geotiff": "^2.0.5",
-    "lzw-tiff-decoder": "^0.1.1"
+    "lzw-tiff-decoder": "^0.1.1",
+    "zod-ome-ngff": "^0.3.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
