@@ -1,0 +1,247 @@
+// From Viv.
+import { fromBlob, fromFile, fromUrl } from 'geotiff';
+import type { GeoTIFF, GeoTIFFImage } from 'geotiff';
+import type { DimensionOrder, OmeXml, PhysicalUnit } from '../../omexml';
+import { assert, DTYPE_LOOKUP, getLabels, prevPowerOf2 } from '../../utils';
+import type { MultiTiffImage } from '../multi-tiff';
+import { createOffsetsProxy } from './proxies';
+
+// TODO: Remove the fancy label stuff
+export type OmeTiffDims =
+  | ['t', 'c', 'z']
+  | ['z', 't', 'c']
+  | ['t', 'z', 'c']
+  | ['c', 'z', 't']
+  | ['z', 'c', 't']
+  | ['c', 't', 'z'];
+
+export interface OmeTiffSelection {
+  t: number;
+  c: number;
+  z: number;
+}
+
+type PhysicalSize = {
+  size: number;
+  unit: PhysicalUnit;
+};
+
+type PhysicalSizes = {
+  x: PhysicalSize;
+  y: PhysicalSize;
+  z?: PhysicalSize;
+};
+
+export function extractPhysicalSizesfromPixels(
+  d: OmeXml[number]['Pixels']
+): undefined | PhysicalSizes {
+  if (
+    !d['PhysicalSizeX'] ||
+    !d['PhysicalSizeY'] ||
+    !d['PhysicalSizeXUnit'] ||
+    !d['PhysicalSizeYUnit']
+  ) {
+    return undefined;
+  }
+  const physicalSizes: PhysicalSizes = {
+    x: { size: d['PhysicalSizeX'], unit: d['PhysicalSizeXUnit'] },
+    y: { size: d['PhysicalSizeY'], unit: d['PhysicalSizeYUnit'] }
+  };
+  if (d['PhysicalSizeZ'] && d['PhysicalSizeZUnit']) {
+    physicalSizes.z = {
+      size: d['PhysicalSizeZ'],
+      unit: d['PhysicalSizeZUnit']
+    };
+  }
+  return physicalSizes;
+}
+
+export function parsePixelDataType(dtype: string) {
+  assert(dtype in DTYPE_LOOKUP, `Pixel type ${dtype} not supported.`);
+  return DTYPE_LOOKUP[dtype as keyof typeof DTYPE_LOOKUP];
+}
+
+export function extractAxesFromPixels(d: OmeXml[number]['Pixels']) {
+  // e.g. 'XYZCT' -> ['t', 'c', 'z', 'y', 'x']
+  const labels = getLabels(d['DimensionOrder']);
+
+  // Compute "shape" of image
+  const shape: number[] = Array(labels.length).fill(0);
+  shape[labels.indexOf('t')] = d['SizeT'];
+  shape[labels.indexOf('c')] = d['SizeC'];
+  shape[labels.indexOf('z')] = d['SizeZ'];
+  shape[labels.indexOf('y')] = d['SizeY'];
+  shape[labels.indexOf('x')] = d['SizeX'];
+
+  // Push extra dimension if data are interleaved.
+  if (d['Interleaved']) {
+    // @ts-expect-error private, unused dim name for selection
+    labels.push('_c');
+    shape.push(3);
+  }
+
+  return { labels, shape };
+}
+
+/**
+ * Compute the shape of the image at a given resolution level.
+ *
+ * Assumes that the image is downsampled by a factor of 2 for each
+ * pyramid level.
+ */
+export function getShapeForBinaryDownsampleLevel(options: {
+  axes: { shape: number[]; labels: string[] };
+  level: number;
+}) {
+  const { axes, level } = options;
+  const xIndex = axes.labels.indexOf('x');
+  assert(xIndex !== -1, 'x dimension not found');
+  const yIndex = axes.labels.indexOf('y');
+  assert(yIndex !== -1, 'y dimension not found');
+  const resolutionShape = axes.shape.slice();
+  resolutionShape[xIndex] = axes.shape[xIndex] >> level;
+  resolutionShape[yIndex] = axes.shape[yIndex] >> level;
+  return resolutionShape;
+}
+
+export function getTiffTileSize(image: GeoTIFFImage) {
+  const tileWidth = image.getTileWidth();
+  const tileHeight = image.getTileHeight();
+  const size = Math.min(tileWidth, tileHeight);
+  // deck.gl requirement for power-of-two tile size.
+  return prevPowerOf2(size);
+}
+
+// Inspired by/borrowed from https://geotiffjs.github.io/geotiff.js/geotiffimage.js.html#line297
+export function guessImageDataType(image: GeoTIFFImage) {
+  // Assuming these are flat TIFFs, just grab the info for the first image/sample.
+  const sampleIndex = 0;
+  const format = image.fileDirectory?.SampleFormat?.[sampleIndex] ?? 1;
+  const bitsPerSample = image.fileDirectory.BitsPerSample[sampleIndex];
+  switch (format) {
+    case 1: // unsigned integer data
+      if (bitsPerSample <= 8) {
+        return DTYPE_LOOKUP.uint8;
+      }
+      if (bitsPerSample <= 16) {
+        return DTYPE_LOOKUP.uint16;
+      }
+      if (bitsPerSample <= 32) {
+        return DTYPE_LOOKUP.uint32;
+      }
+      break;
+    case 2: // twos complement signed integer data
+      if (bitsPerSample <= 8) {
+        return DTYPE_LOOKUP.int8;
+      }
+      if (bitsPerSample <= 16) {
+        return DTYPE_LOOKUP.int16;
+      }
+      if (bitsPerSample <= 32) {
+        return DTYPE_LOOKUP.int32;
+      }
+      break;
+    case 3:
+      switch (bitsPerSample) {
+        case 16:
+          // Should be float 16, maybe 32 will work?
+          // Or should we raise an error?
+          return DTYPE_LOOKUP.float;
+        case 32:
+          return DTYPE_LOOKUP.float;
+        case 64:
+          return DTYPE_LOOKUP.double;
+        default:
+          break;
+      }
+      break;
+    default:
+      break;
+  }
+  throw Error('Unsupported data format/bitsPerSample');
+}
+
+
+// If a channel has multiple z or t slices with different samples per pixel
+// this function will just use the samples per pixel from a random slice.
+function getChannelSamplesPerPixel(
+  tiffs: MultiTiffImage[],
+  numChannels: number
+): number[] {
+  const channelSamplesPerPixel = Array(numChannels).fill(0);
+  for (const tiff of tiffs) {
+    const curChannel = tiff.selection.c;
+    const curSamplesPerPixel = tiff.tiff.getSamplesPerPixel();
+    const existingSamplesPerPixel = channelSamplesPerPixel[curChannel];
+    if (
+      existingSamplesPerPixel &&
+      existingSamplesPerPixel !== curSamplesPerPixel
+    ) {
+      throw Error('Channel samples per pixel mismatch');
+    }
+    channelSamplesPerPixel[curChannel] = curSamplesPerPixel;
+  }
+  return channelSamplesPerPixel;
+}
+
+export function parseFilename(path: string) {
+  const parsedFilename: { name?: string; extension?: string } = {};
+  const filename = path.split('/').pop();
+  const splitFilename = filename?.split('.');
+  if (splitFilename) {
+    parsedFilename.name = splitFilename.slice(0, -1).join('.');
+    [, parsedFilename.extension] = splitFilename;
+  }
+  return parsedFilename;
+}
+
+/**
+ * Creates a GeoTIFF object from a URL, File, or Blob.
+ *
+ * @param source - URL, File, or Blob
+ * @param options
+ * @param options.headers - HTTP headers to use when fetching a URL
+ */
+function createGeoTiffObject(
+  source: string | URL | File,
+  { headers }: { headers?: Headers | Record<string, string> }
+): Promise<GeoTIFF> {
+  if (source instanceof Blob) {
+    return fromBlob(source);
+  }
+  const url = typeof source === 'string' ? new URL(source) : source;
+  if (url.protocol === 'file:') {
+    return fromFile(url.pathname);
+  }
+  // https://github.com/ilan-gold/geotiff.js/tree/viv#abortcontroller-support
+  // https://www.npmjs.com/package/lru-cache#options
+  // Cache size needs to be infinite due to consistency issues.
+  return fromUrl(url.href, { headers, cacheSize: Number.POSITIVE_INFINITY });
+}
+
+/**
+ * Creates a GeoTIFF object from a URL, File, or Blob.
+ *
+ * If `offsets` are provided, a proxy is returned that
+ * intercepts calls to `tiff.getImage` and injects the
+ * pre-computed offsets. This is a performance enhancement.
+ *
+ * @param source - URL, File, or Blob
+ * @param options
+ * @param options.headers - HTTP headers to use when fetching a URL
+ */
+export async function createGeoTiff(
+  source: string | URL | File,
+  options: {
+    headers?: Headers | Record<string, string>;
+    offsets?: number[];
+  } = {}
+): Promise<GeoTIFF> {
+  const tiff = await createGeoTiffObject(source, options);
+  /*
+   * Performance enhancement. If offsets are provided, we
+   * create a proxy that intercepts calls to `tiff.getImage`
+   * and injects the pre-computed offsets.
+   */
+  return options.offsets ? createOffsetsProxy(tiff, options.offsets) : tiff;
+}
