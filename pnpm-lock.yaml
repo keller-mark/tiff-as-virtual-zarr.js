@@ -35,6 +35,9 @@ importers:
         specifier: ^0.3.0
         version: 0.3.0(zod@3.25.76)
     devDependencies:
+      ome-zarr.js:
+        specifier: ^0.0.17
+        version: 0.0.17
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -456,6 +459,9 @@ packages:
   obug@2.1.1:
     resolution: {integrity: sha512-uTqF9MuPraAQ+IsnPf366RG4cP9RtUi7MLO1N3KEc+wb0a6yKpeL0lmk2IB1jY5KHPAlTc6T/JRdC/YqxHNwkQ==}
 
+  ome-zarr.js@0.0.17:
+    resolution: {integrity: sha512-5t10obZtLX1Lwgo7kpqGdkPYJOAmRmTojCjhEiOlyDJ66zyyj7PCFN5CkUWsCQSvpWomZ9JwLsjEhv9rhJS4fQ==}
+
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
 
@@ -600,6 +606,9 @@ packages:
   xmldom@0.6.0:
     resolution: {integrity: sha512-iAcin401y58LckRZ0TkI4k0VSM1Qg0KGSc3i8rU+xrxe19A/BN1zHyVSJY7uoutVlaTSzYyk/v5AmkewAP7jtg==}
     engines: {node: '>=10.0.0'}
+
+  zarrita@0.5.4:
+    resolution: {integrity: sha512-i88iN2+HqIQ+uiCEWLfhjbYNXAJD7IrM4h3lFwFclfqEOOhxp10amRWtqmgN5jbuy3+h0LwdyLVVzk4y9rTLgg==}
 
   zarrita@0.6.1:
     resolution: {integrity: sha512-YOMTW8FT55Rz+vadTIZeOFZ/F2h4svKizyldvPtMYSxPgSNcRkOzkxCsWpIWlWzB1I/LmISmi0bEekOhLlI+Zw==}
@@ -893,6 +902,10 @@ snapshots:
 
   obug@2.1.1: {}
 
+  ome-zarr.js@0.0.17:
+    dependencies:
+      zarrita: 0.5.4
+
   pathe@2.0.3: {}
 
   picocolors@1.1.1: {}
@@ -1017,6 +1030,11 @@ snapshots:
       stackback: 0.0.2
 
   xmldom@0.6.0: {}
+
+  zarrita@0.5.4:
+    dependencies:
+      '@zarrita/storage': 0.1.4
+      numcodecs: 0.3.2
 
   zarrita@0.6.1:
     dependencies:

@@ -11,3 +11,6 @@
 	path = ngff-spec
 	url = https://github.com/ome/ngff-spec
 	branch = 0.5
+[submodule "ome-zarr.js"]
+	path = ome-zarr.js
+	url = https://github.com/BioNGFF/ome-zarr.js

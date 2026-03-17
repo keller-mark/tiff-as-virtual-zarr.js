@@ -45,6 +45,7 @@ This key identifies a particular tile in the multidimensional array representing
 ## Related work
 
 - https://github.com/hms-dbmi/vizarr/pull/254
+- https://github.com/fideus-labs/fiff
 - https://github.com/cgohlke/tifffile/blob/976465b328f7724041b230917f65ca29a3e2294b/tifffile/zarr.py#L235
 - https://github.com/zarr-developers/VirtualiZarr
 - https://github.com/virtual-zarr/virtual-tiff and [#32](https://github.com/virtual-zarr/virtual-tiff/issues/32)

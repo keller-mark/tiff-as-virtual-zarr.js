@@ -1,4 +1,5 @@
 import { OmeTiffAsOmeZarrStore, TiffAsOmeZarrStore } from '../src/index.js';
+import { renderThumbnail } from 'ome-zarr.js';
 
 /**
  * AsyncReadable that reads byte ranges from a browser File using slice().
@@ -58,6 +59,8 @@ class FileSource {
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const status = document.getElementById('status');
+const thumbnailSection = document.getElementById('thumbnail-section');
+const thumbnailImg = document.getElementById('thumbnail');
 const outputNgff = document.getElementById('output-ngff');
 const outputConsolidated = document.getElementById('output-consolidated');
 const downloadNgff = document.getElementById('download-ngff');
@@ -117,6 +120,8 @@ async function processFile(file) {
   downloadConsolidated.disabled = true;
   outputNgff.textContent = '';
   outputConsolidated.textContent = '';
+  thumbnailSection.style.display = 'none';
+  thumbnailImg.src = '';
   fileName = file.name;
   status.textContent = 'Processing…';
 
@@ -133,6 +138,15 @@ async function processFile(file) {
       } catch {
         store = await TiffAsOmeZarrStore.fromStore(source);
       }
+    }
+
+    // Render thumbnail
+    try {
+      const dataUrl = await renderThumbnail(/** @type {any} */ (store));
+      thumbnailImg.src = dataUrl;
+      thumbnailSection.style.display = '';
+    } catch (thumbErr) {
+      console.warn('Thumbnail rendering failed:', thumbErr);
     }
 
     // Read OME-NGFF root metadata

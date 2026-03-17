@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OME-TIFF → Virtual OME-Zarr</title>
+  <title>(OME-)TIFF to OME-Zarr</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     body {
@@ -59,7 +59,7 @@
   </style>
 </head>
 <body>
-  <h1>OME-TIFF → Virtual OME-Zarr</h1>
+  <h1>(OME-)TIFF to Virtual OME-Zarr</h1>
   <p class="subtitle">Drop a local OME-TIFF file to inspect its virtual OME-NGFF and consolidated metadata.</p>
 
   <div id="drop-zone">
@@ -68,6 +68,13 @@
   </div>
 
   <p id="status"></p>
+
+  <div class="section" id="thumbnail-section" style="display:none">
+    <div class="section-header">
+      <h2>Thumbnail</h2>
+    </div>
+    <img id="thumbnail" style="max-width:100%; border:1px solid #ddd; border-radius:4px;" />
+  </div>
 
   <div class="section">
     <div class="section-header">
