@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OME-TIFF → Virtual OME-Zarr</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 900px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      color: #222;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    p.subtitle { color: #555; margin-top: 0; }
+    #drop-zone {
+      border: 2px dashed #aaa;
+      border-radius: 8px;
+      padding: 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    #drop-zone.drag-over { border-color: #0070f3; background: #e8f0fe; }
+    #drop-zone input { display: none; }
+    #drop-zone label { cursor: pointer; color: #0070f3; text-decoration: underline; }
+    #status { margin: 1rem 0; font-size: 0.95rem; color: #444; min-height: 1.4em; }
+    .section { margin-top: 1.5rem; }
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+    .section-header h2 { font-size: 1rem; margin: 0; }
+    button.download {
+      padding: 0.3rem 0.75rem;
+      font-size: 0.85rem;
+      border: 1px solid #0070f3;
+      color: #0070f3;
+      background: white;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button.download:disabled { opacity: 0.4; cursor: default; }
+    button.download:not(:disabled):hover { background: #0070f3; color: white; }
+    pre {
+      background: #f5f5f5;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 1rem;
+      overflow: auto;
+      max-height: 400px;
+      font-size: 0.8rem;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <h1>OME-TIFF → Virtual OME-Zarr</h1>
+  <p class="subtitle">Drop a local OME-TIFF file to inspect its virtual OME-NGFF and consolidated metadata.</p>
+
+  <div id="drop-zone">
+    <p>Drag &amp; drop an OME-TIFF file here, or <label for="file-input">browse</label></p>
+    <input type="file" id="file-input" accept=".tif,.tiff" />
+  </div>
+
+  <p id="status"></p>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>OME-NGFF metadata (<code>/zarr.json</code>)</h2>
+      <button class="download" id="download-ngff" disabled>Download JSON</button>
+    </div>
+    <pre id="output-ngff"></pre>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Consolidated metadata</h2>
+      <button class="download" id="download-consolidated" disabled>Download JSON</button>
+    </div>
+    <pre id="output-consolidated"></pre>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

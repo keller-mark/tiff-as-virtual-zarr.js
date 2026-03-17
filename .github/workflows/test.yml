@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Cache test fixtures
+        id: cache-fixtures
+        uses: actions/cache@v4
+        with:
+          path: |
+            fixtures/9836842.v0_3.ome.tif
+            fixtures/9836842.v0_3.plain.tif
+            fixtures/9836842.v0_3.cropped.zarr
+            fixtures/10501752.v0_4.zarr
+            fixtures/10501752.v0_4.ome.tif
+            fixtures/10501752.v0_4.plain.tif
+            fixtures/ExpD_chicken_embryo_MIP.v0_5.ome.tif
+            fixtures/ExpD_chicken_embryo_MIP.v0_5.plain.tif
+            fixtures/ExpD_chicken_embryo_MIP.v0_5.cropped.ome.zarr
+            fixtures/test_image.ome.tif
+            fixtures/test_image.plain.tif
+            fixtures/test_image.ome.zarr
+          key: fixtures-${{ hashFiles('fixtures/convert_pre_v0_5.py', 'fixtures/convert_v0_5.py', 'fixtures/create_toy_fixtures.py') }}
+
+      - name: Generate test fixtures
+        if: steps.cache-fixtures.outputs.cache-hit != 'true'
+        run: pnpm run generate-fixtures
+
+      - run: pnpm run test
+
+      - run: pnpm run build

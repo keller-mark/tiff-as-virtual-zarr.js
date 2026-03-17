@@ -14,6 +14,14 @@ If the image exceeds --crop-size pixels in Y or X, it is cropped from the
 top-left corner.  When cropping occurs, a matching cropped OME-NGFF v0.5 zarr
 is also written so that the TIFF and zarr fixtures are equivalent.
 
+In addition to the OME-TIFF, a plain (non-OME) TIFF is always written alongside
+it:  grayscale (YX) when there is only one channel or more than three channels,
+RGB (YXC, 3 channels) when there are exactly 2–3 channels.  Any Z or T axes are
+reduced to index 0.
+
+zarr.consolidate_metadata is also called on the reference zarr store so that
+tests can compare against a ground-truth consolidated metadata representation.
+
 Usage:
     uv run convert_v0_5.py <input.ome.zarr> [--output <out.ome.tif>] [--crop-size 512]
 
@@ -23,7 +31,6 @@ Download sample v0.5 images first (from fixtures/README.md):
         ExpD_chicken_embryo_MIP.v0_5.ome.zarr
 """
 import argparse
-import copy
 import numpy as np
 from pathlib import Path
 
@@ -103,6 +110,71 @@ def write_cropped_zarr_v5(
         storage_options=storage_options,
     )
     print(f"Wrote cropped OME-NGFF v0.5 zarr: {out_path}")
+
+
+def make_plain_tiff_array(
+    data: np.ndarray,
+    ax_names: list[str],
+) -> tuple[np.ndarray, str]:
+    """Reduce an ND array to a 2-D (YX) or 3-D (YXC) array for a plain TIFF.
+
+    Rules:
+    - T and Z axes are reduced to index 0.
+    - C == 3: keep all three channels, reorder to YXC → photometric "rgb".
+    - C == 1: squeeze the C dim → grayscale "minisblack".
+    - C == 0 (no C axis): already grayscale.
+    - C > 3 or C == 2: take the first channel only → grayscale "minisblack".
+
+    Returns (array, photometric).
+    """
+    arr = data
+    remaining = list(ax_names)
+
+    # Squeeze T and Z to index 0
+    for ax in ("t", "z"):
+        if ax in remaining:
+            idx = remaining.index(ax)
+            arr = arr.take(0, axis=idx)
+            remaining.pop(remaining.index(ax))
+
+    c_idx = remaining.index("c") if "c" in remaining else None
+
+    if c_idx is None:
+        # Already grayscale YX
+        return arr, "minisblack"
+
+    n_channels = arr.shape[c_idx]
+
+    if n_channels == 3:
+        # Reorder to YXC (move C to last)
+        arr = np.moveaxis(arr, c_idx, -1)
+        return arr, "rgb"
+    elif n_channels == 1:
+        arr = arr.squeeze(axis=c_idx)
+        return arr, "minisblack"
+    else:
+        # 2 channels, or > 3 channels: take channel 0 → grayscale
+        arr = arr.take(0, axis=c_idx)
+        return arr, "minisblack"
+
+
+def write_plain_tiff(
+    data: np.ndarray,
+    ax_names: list[str],
+    output_path: Path,
+    tile_opts: dict,
+) -> None:
+    """Write a plain (non-OME) TIFF: grayscale (YX) or RGB (YXC)."""
+    arr, photometric = make_plain_tiff_array(data, ax_names)
+    print(f"Writing plain TIFF (photometric={photometric}, shape={arr.shape}) …")
+    with TiffWriter(str(output_path), ome=False) as tif:
+        tif.write(
+            arr,
+            photometric=photometric,
+            compression="zlib",
+            **tile_opts,
+        )
+    print(f"Wrote plain TIFF: {output_path}")
 
 
 def main() -> None:
@@ -249,8 +321,18 @@ def main() -> None:
     print(f"Wrote OME-TIFF: {output_path}")
 
     # ------------------------------------------------------------------
+    # Write plain TIFF (grayscale or RGB, no OME metadata)
+    # ------------------------------------------------------------------
+    plain_stem = output_path.stem
+    if plain_stem.endswith(".ome"):
+        plain_stem = plain_stem[: -len(".ome")]
+    plain_tif_path = output_path.parent / f"{plain_stem}.plain.tif"
+    write_plain_tiff(all_data[0], axes, plain_tif_path, tile_opts)
+
+    # ------------------------------------------------------------------
     # Write cropped OME-NGFF zarr (only when cropping occurred)
     # ------------------------------------------------------------------
+    cropped_zarr_path: Path | None = None
     if needs_crop:
         stem = output_path.stem
         if stem.endswith(".ome"):
@@ -261,6 +343,14 @@ def main() -> None:
         write_cropped_zarr_v5(
             cropped_zarr_path, axes_meta, cropped_datasets, all_data, group
         )
+
+    # ------------------------------------------------------------------
+    # Consolidate zarr metadata on the reference store
+    # ------------------------------------------------------------------
+    zarr_ref_path = cropped_zarr_path if cropped_zarr_path is not None else input_path
+    print(f"\nConsolidating zarr metadata: {zarr_ref_path} …")
+    zarr.consolidate_metadata(str(zarr_ref_path))
+    print("Consolidated metadata written.")
 
 
 if __name__ == "__main__":

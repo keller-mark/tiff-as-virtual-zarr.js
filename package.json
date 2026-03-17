@@ -11,7 +11,10 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "pnpm exec vitest --run"
+    "test": "pnpm exec vitest --run",
+    "generate-fixtures": "bash scripts/download_fixtures.sh",
+    "demo:dev": "vite --config demo/vite.config.js",
+    "demo:build": "vite build --config demo/vite.config.js"
   },
   "dependencies": {
     "@chunkd/source": "^11.2.0",
