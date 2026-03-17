@@ -133,7 +133,10 @@ async function resolveMetadata(tiff: Tiff) {
   const image = tiff.images[0];
   const subIfds = (await image.fetch(TiffTag.SubIFDs)) as number[] | null;
   assert(subIfds, "Only support bioformats >6");
-  const raw = String(await image.fetch(TiffTag.ImageDescription));
+  // cogeotiff decodes ASCII tags with String.fromCharCode (Latin-1), but OME-XML is UTF-8.
+  // Re-encode as bytes and decode as UTF-8 so multibyte characters like µ are correct.
+  const rawLatin1 = String(await image.fetch(TiffTag.ImageDescription));
+  const raw = new TextDecoder("utf-8").decode(Uint8Array.from(rawLatin1, (c) => c.charCodeAt(0)));
   // biome-ignore lint/suspicious/noExplicitAny: proper validation later
   const xml = parseXml(raw) as Record<string, any>;
 
