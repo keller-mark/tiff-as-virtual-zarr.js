@@ -1,5 +1,7 @@
 # tiff-as-virtual-zarr.js
 
+[![NPM](https://img.shields.io/npm/v/tiff-as-virtual-zarr.svg?color=black)](https://www.npmjs.com/package/tiff-as-virtual-zarr)
+
 Read OME-TIFF data via the Zarr store interface, with "virtualized" OME-NGFF metadata.
 In other words, given an OME-TIFF file, we want to conceptually/virtually map the image tiles and pyramid resolutions to Zarr chunks and OME-Zarr multiscales.
 We translate OME-XML metadata to OME-NGFF metadata.
