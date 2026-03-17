@@ -1,0 +1,12 @@
+diff --git a/build/read/tiff.tag.factory.js b/build/read/tiff.tag.factory.js
+index 9e15b8a8e85d6403871eede3601911454039e3ad..ce3de2b9ddc7a927edf60fbf5b1db1f672b1d1fe 100644
+--- a/build/read/tiff.tag.factory.js
++++ b/build/read/tiff.tag.factory.js
+@@ -32,6 +32,7 @@ function readTagValue(fieldType, bytes, offset, isLittleEndian) {
+         case TiffTagValueType.Float32:
+             return bytes.getFloat32(offset, isLittleEndian);
+         case TiffTagValueType.Uint64:
++        case TiffTagValueType.Ifd8:
+             return getUint64(bytes, offset, isLittleEndian);
+         default:
+             throw new Error(`Unknown read type "${fieldType}" "${TiffTagValueType[fieldType]}"`);

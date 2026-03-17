@@ -4,10 +4,8 @@ This repository contains the following as git submodules, for your reference:
 - ngff-spec: the OME-NGFF specification.
 - zod-ome-ngff: OME-Zarr (aka OME-NGFF) metadata schema validation in Zod (TypeScript).
 - zarrita.js: Zarr implementation in TypeScript/JavaScript.
-- geotiff.js: JavaScript library for reading TIFF and OME-TIFF files.
 - viv: Library for multiscale visualization of high-resolution multiplexed bioimaging data on the web.
   - Most relevant subdirectory of viv: `packages/loaders/src/`.
-  - Note: viv uses an older version of the geotiff package, which may differ slightly from the latest version in the submodule. Here, we want to be using the latest version of geotiff.js.
 
 
 
@@ -17,8 +15,8 @@ Read OME-TIFF files as virtual OME-Zarr stores — without copying or re-encodin
 
 OmeTiffAsOmeZarrStore should be defined in the NPM package and exported. This class must implement zarrita's
 AsyncReadable interface. Given the convention of mapping OME-TIFF to OME-Zarr in the README, this store should enable a user to run .get and
- .getRange to obtain the store's metadata or array data. Internally, the store should use geotiff.js to fetch the OME-TIFF data for the
-corresponding OME-XML metadata or TIFF array chunks. Metadata should be transformed via zod-ome-ngff and re-encoded to match what would be
+ .getRange to obtain the store's metadata or array data. Internally, the store should fetch the OME-TIFF data for the
+corresponding OME-XML metadata or TIFF array chunks.Metadata should be transformed via zod-ome-ngff and re-encoded to match what would be
 returned when running .get or .getRange on the equivalent OME-NGFF image. Same for the TIFF data - given a requested chunk, the user should
 obtain what they would expect to be returned from the equivalent OME-NGFF image. Unit tests should ensure this equivalence of metadata and
 array data, so that the user can ultimately read their OME-TIFF as if it were a "virtualized" OME-NGFF image. The user should not be able to
@@ -59,5 +57,4 @@ Note: The TIFF and Zarr fixtures are generated independently from the same sourc
 - Typescript
 - Zarrita.js
 - Zod and zod-ome-ngff
-- Geotiff.js for reading TIFF/OME-TIFF data and metadata
 - Vitest for unit tests
