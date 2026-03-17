@@ -1,4 +1,4 @@
-// From Viv.
+// THIS IS A SOURCE CODE FILE THAT HAS BEEN COPIED FROM THE VIV LIBRARY, FOR YOUR REFERENCE.
 import { type GeoTIFF, GeoTIFFImage } from 'geotiff';
 import type { OmeTiffSelection } from './utils';
 

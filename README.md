@@ -4,6 +4,11 @@ This is an effort to read and write OME-TIFF data via the Zarr store interface.
 In other words, given an OME-TIFF file, we want to conceptually/virtually mapping OME-TIFF tiles and resolutions to Zarr chunks and OME-Zarr multiscales.
 We will translate OME-XML metadata to OME-NGFF metadata.
 
+
+For now, we only support the single-file OME-TIFF use case.
+
+The implementation is based heavily on Viv's TiffPixelSource and its related utilities.
+
 ## Development
 
 ```sh

@@ -1,4 +1,4 @@
-// From Viv.
+// THIS IS A SOURCE CODE FILE THAT HAS BEEN COPIED FROM THE VIV LIBRARY, FOR YOUR REFERENCE.
 import type { GeoTIFFImage } from 'geotiff';
 import { SIGNAL_ABORTED, getImageSize, isInterleaved } from '../utils';
 import type { TypedArray } from '../zarr/lib/utils';
