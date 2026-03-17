@@ -1,17 +1,15 @@
 import {
-  fromFile as geoFromFile,
-  fromUrl as geoFromUrl,
-  fromArrayBuffer,
   fromCustomClient,
   GeoTIFFImage,
   BaseClient,
-  BaseResponse,
 } from 'geotiff';
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
 import type { ImageSchema } from 'zod-ome-ngff/0.5';
 import type { z } from 'zod';
 import { type Pixels, type Channel, type DimensionOrder } from './ome-tiff-types.js';
 import { createOffsetsProxy } from './proxies.js';
+import { StoreTiffClient } from './geotiff-client.js';
+import { parseOmeXml, omeUnitToNgff, omeTypeToZarr, getRelativeIfdIndex, encodeJson } from './utils.js';
 
 // ── Metadata for each scale level ────────────────────────────────────────────
 interface ScaleInfo {
@@ -35,204 +33,6 @@ interface TiffMeta {
   interleaved: boolean;
 }
 
-// ── OME-XML parser ────────────────────────────────────────────────────────────
-async function parseOmeXml(xml: string): Promise<{ pixels: Pixels; channels: Channel[] }> {
-  let parser: DOMParser;
-  if (typeof DOMParser !== 'undefined') {
-    parser = new DOMParser();
-  } else {
-    // Node.js / test environment — xmldom must be installed as a dep
-    const { DOMParser: NodeDOMParser } = await import(/* @vite-ignore */ 'xmldom');
-    parser = new NodeDOMParser() as unknown as DOMParser;
-  }
-
-  const doc = parser.parseFromString(xml, 'text/xml');
-  const pixelsEl = doc.getElementsByTagName('Pixels')[0];
-  if (!pixelsEl) throw new Error('No Pixels element in OME-XML');
-
-  const ga = (name: string): string | null => pixelsEl.getAttribute(name);
-
-  const pixels: Pixels = {
-    ID: ga('ID') ?? '',
-    DimensionOrder: (ga('DimensionOrder') ?? 'XYCZT') as DimensionOrder,
-    Type: (ga('Type') ?? 'uint8') as Pixels['Type'],
-    SizeX: parseInt(ga('SizeX') ?? '0'),
-    SizeY: parseInt(ga('SizeY') ?? '0'),
-    SizeZ: parseInt(ga('SizeZ') ?? '1'),
-    SizeT: parseInt(ga('SizeT') ?? '1'),
-    SizeC: parseInt(ga('SizeC') ?? '1'),
-    PhysicalSizeX: toFloat(ga('PhysicalSizeX')),
-    PhysicalSizeXUnit: ga('PhysicalSizeXUnit') as Pixels['PhysicalSizeXUnit'],
-    PhysicalSizeY: toFloat(ga('PhysicalSizeY')),
-    PhysicalSizeYUnit: ga('PhysicalSizeYUnit') as Pixels['PhysicalSizeYUnit'],
-    PhysicalSizeZ: toFloat(ga('PhysicalSizeZ')),
-    PhysicalSizeZUnit: ga('PhysicalSizeZUnit') as Pixels['PhysicalSizeZUnit'],
-    SignificantBits: parseInt(ga('SignificantBits') ?? '0'),
-    BigEndian: ga('BigEndian') === 'true',
-    Interleaved: ga('Interleaved') === 'true',
-    TiffData: { IFD: '', PlaneCount: 0 },
-    Channels: [],
-  };
-
-  const channelEls = doc.getElementsByTagName('Channel');
-  const channels: Channel[] = [];
-  for (let i = 0; i < channelEls.length; i++) {
-    const el = channelEls[i];
-    const colorStr = el.getAttribute('Color');
-    let color: number[] | undefined;
-    if (colorStr != null) {
-      // OME Color is a packed signed 32-bit RGBA integer
-      const u = parseInt(colorStr) >>> 0;
-      color = [(u >>> 24) & 0xff, (u >>> 16) & 0xff, (u >>> 8) & 0xff, u & 0xff];
-    }
-    channels.push({
-      ID: el.getAttribute('ID') ?? `Channel:0:${i}`,
-      SamplesPerPixel: parseInt(el.getAttribute('SamplesPerPixel') ?? '1'),
-      ...(el.getAttribute('Name') != null ? { Name: el.getAttribute('Name')! } : {}),
-      ...(color ? { Color: color } : {}),
-    });
-  }
-  pixels.Channels = channels;
-
-  return { pixels, channels };
-}
-
-function toFloat(s: string | null): number {
-  return s != null ? parseFloat(s) : 0;
-}
-
-// ── Unit conversion (OME-XML → UDUNITS-2 / OME-NGFF) ─────────────────────────
-// OME-XML uses symbol shorthand (e.g. "µm"); OME-NGFF expects the UDUNITS-2
-// full name (e.g. "micrometer").
-const OME_UNIT_TO_NGFF: Record<string, string> = {
-  Ym: 'yottameter', Zm: 'zettameter', Em: 'exameter', Pm: 'petameter',
-  Tm: 'terameter', Gm: 'gigameter', Mm: 'megameter', km: 'kilometer',
-  hm: 'hectometer', dam: 'decameter', m: 'meter', dm: 'decimeter',
-  cm: 'centimeter', mm: 'millimeter', µm: 'micrometer', nm: 'nanometer',
-  pm: 'picometer', fm: 'femtometer', am: 'attometer', zm: 'zeptometer',
-  ym: 'yoctometer', Å: 'angstrom',
-  thou: 'thou', li: 'link', in: 'inch', ft: 'foot', yd: 'yard',
-  mi: 'mile', ua: 'astronomicalUnit', ly: 'lightYear', pc: 'parsec',
-  pt: 'point', pixel: 'pixel', 'reference frame': 'referenceFrame',
-};
-
-function omeUnitToNgff(unit: string | null | undefined): string | undefined {
-  if (!unit) return undefined;
-  return OME_UNIT_TO_NGFF[unit] ?? unit;
-}
-
-// ── Type conversion ───────────────────────────────────────────────────────────
-function omeTypeToZarr(omeType: string): string {
-  const map: Record<string, string> = {
-    uint8: 'uint8', uint16: 'uint16', uint32: 'uint32',
-    int8: 'int8', int16: 'int16', int32: 'int32',
-    float: 'float32', double: 'float64',
-    bit: 'uint8',
-  };
-  return map[omeType] ?? 'uint8';
-}
-
-// ── IFD index calculation (ported from Viv's getRelativeOmeIfdIndex) ──────────
-function getRelativeIfdIndex(
-  sel: { t: number; z: number; c: number },
-  dimensionOrder: DimensionOrder,
-  sizes: { t: number; z: number; c: number },
-): number {
-  const { t, z, c } = sel;
-  switch (dimensionOrder) {
-    case 'XYZCT': return z + sizes.z * c + sizes.z * sizes.c * t;
-    case 'XYZTC': return z + sizes.z * t + sizes.z * sizes.t * c;
-    case 'XYCTZ': return c + sizes.c * t + sizes.c * sizes.t * z;
-    case 'XYCZT': return c + sizes.c * z + sizes.c * sizes.z * t;
-    case 'XYTCZ': return t + sizes.t * c + sizes.t * sizes.c * z;
-    case 'XYTZC': return t + sizes.t * z + sizes.t * sizes.z * c;
-    default: throw new Error(`Invalid DimensionOrder: ${dimensionOrder}`);
-  }
-}
-
-// ── Custom geotiff client backed by an AsyncReadable store ────────────────────
-//
-// Reads the entire TIFF from store.get('/') on first access and caches it in
-// memory, then serves byte-range slices to geotiff's internal reader.
-// For large remote TIFFs, prefer OmeTiffAsOmeZarrStore.fromUrl() so that
-// geotiff can issue true HTTP Range requests.
-
-class StoreTiffResponse extends BaseResponse {
-  private readonly _statusCode: number;
-  private readonly _data: ArrayBuffer;
-  private readonly _rangeOffset: number;
-  private readonly _rangeLength: number;
-  private readonly _total: number;
-
-  constructor(
-    statusCode: number,
-    data: ArrayBuffer,
-    rangeOffset = 0,
-    rangeLength?: number,
-    total = 0,
-  ) {
-    super();
-    this._statusCode = statusCode;
-    this._data = data;
-    this._rangeOffset = rangeOffset;
-    this._rangeLength = rangeLength ?? data.byteLength;
-    this._total = total || data.byteLength;
-  }
-
-  // BaseResponse.status is typed as void in the .d.ts (an upstream quirk); at
-  // runtime it must return a number so that BaseResponse.ok works correctly.
-  get status(): any { return this._statusCode; }
-
-  getHeader(name: string): string {
-    if (name.toLowerCase() === 'content-range') {
-      const end = this._rangeOffset + this._rangeLength - 1;
-      return `bytes ${this._rangeOffset}-${end}/${this._total}`;
-    }
-    return '';
-  }
-
-  getData(): ArrayBuffer { return this._data; }
-}
-
-class StoreTiffClient extends BaseClient {
-  private _store: AsyncReadable;
-  private _cachedData: ArrayBuffer | null = null;
-
-  constructor(store: AsyncReadable) {
-    super('/');
-    this._store = store;
-  }
-
-  private async _getAll(): Promise<ArrayBuffer> {
-    if (!this._cachedData) {
-      const bytes = await this._store.get('/' as AbsolutePath);
-      if (!bytes) throw new Error('StoreTiffClient: store returned no data at "/"');
-      this._cachedData = bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength,
-      ) as ArrayBuffer;
-    }
-    return this._cachedData;
-  }
-
-  async request(
-    { headers = {} }: { headers?: Record<string, string>; signal?: AbortSignal } = {},
-  ): Promise<StoreTiffResponse> {
-    const all = await this._getAll();
-    const rangeHeader = (headers as Record<string, string>)['Range'];
-    if (rangeHeader) {
-      // geotiff sends Range: bytes=offset-(offset+length) where end is exclusive
-      const m = rangeHeader.match(/bytes=(\d+)-(\d+)/);
-      if (m) {
-        const offset = parseInt(m[1]);
-        const length = parseInt(m[2]) - offset;
-        return new StoreTiffResponse(206, all.slice(offset, offset + length), offset, length, all.byteLength);
-      }
-    }
-    return new StoreTiffResponse(200, all);
-  }
-}
-
 // ── Main store class ──────────────────────────────────────────────────────────
 export class OmeTiffAsOmeZarrStore implements AsyncReadable {
   private _tiff: any;
@@ -242,14 +42,6 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
 
   private constructor(tiff: any) {
     this._tiff = tiff;
-  }
-
-  static async fromFile(path: string): Promise<OmeTiffAsOmeZarrStore> {
-    return new OmeTiffAsOmeZarrStore(await geoFromFile(path));
-  }
-
-  static async fromUrl(url: string, options?: Record<string, any>): Promise<OmeTiffAsOmeZarrStore> {
-    return new OmeTiffAsOmeZarrStore(await geoFromUrl(url, options));
   }
 
   /**
@@ -299,14 +91,10 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
   async getRange(key: AbsolutePath, range: RangeQuery): Promise<Uint8Array | undefined> {
     const full = await this.get(key);
     if (!full) return undefined;
-    const { offset = 0, length, suffixLength } = range;
-    if (suffixLength != null) {
-      return full.slice(Math.max(0, full.length - suffixLength));
+    if ('suffixLength' in range) {
+      return full.slice(Math.max(0, full.length - range.suffixLength));
     }
-    if (length != null) {
-      return full.slice(offset, offset + length);
-    }
-    return full.slice(offset);
+    return full.slice(range.offset, range.offset + range.length);
   }
 
   // ── Metadata initialisation ────────────────────────────────────────────────
@@ -426,7 +214,8 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     const physY = pixels.PhysicalSizeY || 1.0;
     const unit = omeUnitToNgff(pixels.PhysicalSizeXUnit);
 
-    const axes: object[] = [];
+    type Axis = { name: string; type: string; unit?: string };
+    const axes: Axis[] = [];
     for (const d of meta.activeDims) {
       if (d === 't') axes.push({ name: 't', type: 'time' });
       else if (d === 'c') axes.push({ name: 'c', type: 'channel' });
@@ -440,7 +229,7 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
       coordinateTransformations: [
         {
           type: 'scale',
-          scale: axes.map((ax: any) => {
+          scale: axes.map((ax) => {
             if (ax.name === 'y') return physY * s.scaleFactorY;
             if (ax.name === 'x') return physX * s.scaleFactorX;
             return 1.0;
@@ -461,16 +250,18 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
         : {}),
     }));
 
+    const omeContent: Record<string, any> = {
+      version: '0.5',
+      multiscales: [{ axes, datasets, name: '/' }],
+    };
+    if (omeroChannels.length > 0) {
+      omeContent.omero = { channels: omeroChannels };
+    }
+
     return {
       zarr_format: 3,
       node_type: 'group',
-      attributes: {
-        ome: {
-          version: '0.5',
-          multiscales: [{ axes, datasets, name: '/' }],
-          ...(omeroChannels.length > 0 ? { omero: { channels: omeroChannels } } : {}),
-        },
-      } as unknown as z.infer<typeof ImageSchema>,
+      attributes: { ome: omeContent },
     };
   }
 
@@ -579,9 +370,4 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     }
     return out;
   }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function encodeJson(obj: object): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(obj));
 }

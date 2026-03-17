@@ -23,11 +23,11 @@ pnpm run test
 
 ## Virtual tiff-to-zarr mapping
 
-### `/.zattrs` (Zarr v2) or `/zarr.json` (Zarr v3) attrs for root metadata
+### `/zarr.json` (Zarr v3) attrs for root metadata
 
 This should list the dimensions, multiscales, and channels according to the OME-NGFF metadata schema.
 
-### Image array `/{scale}/.zattrs`
+### Image array `/{scale}/zarr.json`
 
 This should list the shape and `dtype` of the array and other properties such as compression parameters.
 

@@ -14,16 +14,17 @@
     "test": "pnpm exec vitest --run"
   },
   "dependencies": {
-    "zarrita": "^0.6.1",
     "@zarrita/storage": "^0.1.4",
     "geotiff": "^2.0.5",
     "lzw-tiff-decoder": "^0.1.1",
+    "zarrita": "^0.6.1",
+    "zod": "^3.25.76",
     "zod-ome-ngff": "^0.3.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18",
     "vite": "^7.3.1",
+    "vitest": "^4.0.18",
     "xmldom": "^0.6.0"
   }
 }
