@@ -11,6 +11,3 @@
 	path = ngff-spec
 	url = https://github.com/ome/ngff-spec
 	branch = 0.5
-[submodule "geotiff.js"]
-	path = geotiff.js
-	url = https://github.com/geotiffjs/geotiff.js
