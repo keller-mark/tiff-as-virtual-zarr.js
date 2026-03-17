@@ -1,4 +1,4 @@
-import { OmeTiffAsOmeZarrStore } from '../src/index.js';
+import { OmeTiffAsOmeZarrStore, TiffAsOmeZarrStore } from '../src/index.js';
 
 /**
  * AsyncReadable that reads byte ranges from a browser File using slice().
@@ -122,7 +122,18 @@ async function processFile(file) {
 
   try {
     const source = new FileSource(file);
-    const store = await OmeTiffAsOmeZarrStore.fromStore(source);
+    const lowerName = file.name.toLowerCase();
+    const isOmeTiff = lowerName.endsWith('.ome.tif') || lowerName.endsWith('.ome.tiff');
+    let store;
+    if (isOmeTiff) {
+      store = await OmeTiffAsOmeZarrStore.fromStore(source);
+    } else {
+      try {
+        store = await OmeTiffAsOmeZarrStore.fromStore(source);
+      } catch {
+        store = await TiffAsOmeZarrStore.fromStore(source);
+      }
+    }
 
     // Read OME-NGFF root metadata
     const ngffBytes = await store.get('/zarr.json');
