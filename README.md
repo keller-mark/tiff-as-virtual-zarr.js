@@ -20,6 +20,12 @@ Run unit tests:
 pnpm run test
 ```
 
+Publish:
+
+```sh
+pnpm publish --filter "tiff-as-virtual-zarr"
+```
+
 ## Virtual tiff-to-zarr mapping
 
 ### `/zarr.json` (Zarr v3) attrs for root metadata

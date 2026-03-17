@@ -1,6 +1,6 @@
 {
   "name": "tiff-as-virtual-zarr",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "author": "",
   "license": "MIT",
   "type": "module",
