@@ -22,6 +22,7 @@ class SourceSpy implements AsyncReadable {
   getCalls = 0;
   private ab: ArrayBuffer;
 
+  // TODO: rather than taking the full arrayBuffer up-front, we should just accept a FileSystemStore instance, and call its .get/getRange methods internally.
   constructor(ab: ArrayBuffer) {
     this.ab = ab;
     this.fileSize = ab.byteLength;

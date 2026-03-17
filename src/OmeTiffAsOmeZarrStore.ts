@@ -2,6 +2,7 @@ import {
   fromCustomClient,
   GeoTIFFImage,
   BaseClient,
+  type GeoTIFF,
 } from 'geotiff';
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
 import type { ImageSchema } from 'zod-ome-ngff/0.5';
@@ -35,12 +36,12 @@ interface TiffMeta {
 
 // ── Main store class ──────────────────────────────────────────────────────────
 export class OmeTiffAsOmeZarrStore implements AsyncReadable {
-  private _tiff: any;
+  private _tiff: GeoTIFF;
   private _meta: TiffMeta | null = null;
   // Cache of GeoTIFFImage instances keyed by "scale:baseIfdIndex"
   private _imgCache = new Map<string, GeoTIFFImage>();
 
-  private constructor(tiff: any) {
+  private constructor(tiff: GeoTIFF) {
     this._tiff = tiff;
   }
 
@@ -54,7 +55,7 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     store: AsyncReadable,
     offsets?: number[],
   ): Promise<OmeTiffAsOmeZarrStore> {
-    const client = new StoreTiffClient(store) as unknown as BaseClient;
+    const client = new StoreTiffClient(store);
     const tiff = await fromCustomClient(client);
     return new OmeTiffAsOmeZarrStore(offsets ? createOffsetsProxy(tiff, offsets) : tiff);
   }
@@ -330,6 +331,7 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
 
     if (x0 >= imageW || y0 >= imageH) return undefined;
 
+    // TODO: if the OME-TIFF is interleaved on-disk, we will need to un-interleave it for its corresponding OME-NGFF representation.
     const interleave = meta.interleaved;
     const rasters: any = await geoImg.readRasters({
       window: [x0, y0, x1, y1],

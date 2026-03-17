@@ -10,7 +10,7 @@
     "dist"
   ],
   "scripts": {
-    "bundle": "pnpm exec vite build -c ../../scripts/vite.config.mjs",
+    "build": "tsc",
     "test": "pnpm exec vitest --run"
   },
   "dependencies": {
