@@ -130,6 +130,33 @@ function encodeJson(obj: Record<string, unknown>): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(obj, null, 2));
 }
 
+type AxisName = 't' | 'c' | 'z' | 'y' | 'x';
+
+function getActiveAxes(sizes: { t: number; c: number; z: number }): AxisName[] {
+  const axes: AxisName[] = [];
+  if (sizes.t > 1) axes.push('t');
+  if (sizes.c > 1) axes.push('c');
+  if (sizes.z > 1) axes.push('z');
+  axes.push('y', 'x');
+  return axes;
+}
+
+function omeTiffTypeToZarrType(omeType: string): string {
+  const typeMap: Record<string, string> = {
+    uint8: 'uint8',
+    uint16: 'uint16',
+    uint32: 'uint32',
+    uint64: 'uint64',
+    int8: 'int8',
+    int16: 'int16',
+    int32: 'int32',
+    int64: 'int64',
+    float: 'float32',
+    double: 'float64',
+  };
+  return typeMap[omeType.toLowerCase()] ?? omeType;
+}
+
 function parseKey(key: AbsolutePath):
   | {
       kind: "meta";
@@ -138,7 +165,7 @@ function parseKey(key: AbsolutePath):
   | {
       kind: "chunk";
       resolution: number;
-      coords: { t: number; c: number; z: number; y: number; x: number };
+      chunkCoords: number[];
     }
   | {
       kind: "unknown";
@@ -146,21 +173,18 @@ function parseKey(key: AbsolutePath):
   if (key === "/zarr.json") {
     return { kind: "meta", value: { kind: "root" } };
   }
-  let match = key.match(/^\/(\d+)\/zarr.json$/);
+  let match = key.match(/^\/(\d+)\/zarr\.json$/);
   if (match) {
     return {
       kind: "meta",
       value: { kind: "resolution", value: +match[1] },
     };
   }
-  match = key.match(/^\/(\d+)\/c\/(\d+)\/(\d+)\/(\d+)\/(\d+)\/(\d+)$/);
+  match = key.match(/^\/(\d+)\/c\/([\d/]+)$/);
   if (match) {
-    let [resolution, t, c, z, y, x] = match.slice(1, 7).map((d) => +d);
-    return {
-      kind: "chunk",
-      resolution,
-      coords: { t, c, z, y, x },
-    };
+    const resolution = +match[1];
+    const chunkCoords = match[2].split('/').map((d) => +d);
+    return { kind: "chunk", resolution, chunkCoords };
   }
   return { kind: "unknown" };
 }
@@ -169,6 +193,7 @@ type Context = {
   tileSize: number;
   bytesPerPixel: number;
   predictor: Predictor;
+  activeAxes: AxisName[];
   indexer(
     coords: {
       z: number;
@@ -197,11 +222,10 @@ async function resolveMetadata(tiff: Tiff) {
   const name = xml?.Image?.attr?.Name ?? "unknown";
   assert(typeof name === "string");
 
-  // TODO: translate to OME-NGFF "axes" units
-  // const physicalSizeX = Number(xml.Image?.Pixels?.attr?.PhysicalSizeX);
-  // const physicalSizeXUnit = xml.Image?.Pixels?.attr?.PhysicalSizeXUnit;
-  // const physicalSizeY = Number(xml.Image?.Pixels?.attr?.PhysicalSizeY);
-  // const physicalSizeYUnit = xml.Image?.Pixels?.attr?.PhysicalSizeYUnit;
+  const physicalSizeX = Number(xml.Image?.Pixels?.attr?.PhysicalSizeX);
+  const physicalSizeXUnit = xml.Image?.Pixels?.attr?.PhysicalSizeXUnit as string | undefined;
+  const physicalSizeY = Number(xml.Image?.Pixels?.attr?.PhysicalSizeY);
+  const physicalSizeYUnit = xml.Image?.Pixels?.attr?.PhysicalSizeYUnit as string | undefined;
 
   const sizeT = Number(xml.Image?.Pixels?.attr?.SizeT);
   const sizeC = Number(xml.Image?.Pixels?.attr?.SizeC);
@@ -259,17 +283,23 @@ async function resolveMetadata(tiff: Tiff) {
   const bytesPerPixel = bitsPerSample ? bitsPerSample[0] / 8 : 1;
   const predictor = image.value(TiffTag.Predictor) ?? Predictor.None;
 
+  const sizes = { t: sizeT, c: sizeC, z: sizeZ, y: sizeY, x: sizeX };
   return {
     raw,
     dimensionOrder,
-    dataType,
+    dataType: omeTiffTypeToZarrType(dataType),
     name,
-    sizes: { t: sizeT, c: sizeC, z: sizeZ, y: sizeY, x: sizeX },
+    sizes,
     omero,
     resolutions: subIfds.length - 1,
     tileSize: getTileSize(image),
     bytesPerPixel,
     predictor,
+    activeAxes: getActiveAxes(sizes),
+    physicalSizeX,
+    physicalSizeY,
+    physicalSizeXUnit,
+    physicalSizeYUnit,
   };
 }
 
@@ -298,28 +328,55 @@ async function loadSubIfd(tiff: Tiff, offset: number): Promise<TiffImage> {
 
 async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
   const meta = await resolveMetadata(tiff);
+  const { activeAxes } = meta;
+
+  // Spatial scale at base resolution (from physical size, defaulting to 1.0)
+  const baseScaleY = !Number.isNaN(meta.physicalSizeY) && meta.physicalSizeY > 0 ? meta.physicalSizeY : 1.0;
+  const baseScaleX = !Number.isNaN(meta.physicalSizeX) && meta.physicalSizeX > 0 ? meta.physicalSizeX : 1.0;
+
   const ome = {
+    version: '0.5',
     omero: meta.omero,
     multiscales: [
       {
-        datasets: Array.from({ length: meta.resolutions }, (_, i) => ({
-          path: i.toString(),
-        })),
-        axes: [
-          { name: "t", type: "time" },
-          { name: "c", type: "channel" },
-          { name: "z", type: "space" },
-          { name: "y", type: "space" },
-          { name: "x", type: "space" },
-        ],
+        datasets: Array.from({ length: meta.resolutions }, (_, i) => {
+          const scaleFactor = Math.pow(2, i);
+          const scale = activeAxes.map((axis) => {
+            if (axis === 'y') return baseScaleY * scaleFactor;
+            if (axis === 'x') return baseScaleX * scaleFactor;
+            return 1.0;
+          });
+          return {
+            path: i.toString(),
+            coordinateTransformations: [{ type: 'scale', scale }],
+          };
+        }),
+        axes: activeAxes.map((name) => {
+          if (name === 'c') return { name: 'c', type: 'channel' };
+          if (name === 't') return { name: 't', type: 'time' };
+          if (name === 'z') return { name: 'z', type: 'space' };
+          if (name === 'y') return {
+            name: 'y',
+            type: 'space',
+            ...(meta.physicalSizeYUnit ? { unit: meta.physicalSizeYUnit } : {}),
+          };
+          // 'x'
+          return {
+            name: 'x',
+            type: 'space',
+            ...(meta.physicalSizeXUnit ? { unit: meta.physicalSizeXUnit } : {}),
+          };
+        }),
       },
     ],
   };
+
   const subIfdCache = new Map<number, TiffImage>();
   return {
     tileSize: meta.tileSize,
     bytesPerPixel: meta.bytesPerPixel,
     predictor: meta.predictor,
+    activeAxes,
     async indexer(coords: { z: number; c: number; t: number }, resolution: number) {
       const baseImage = tiff.images[getRelativeOmeIfdIndex(coords, meta)];
 
@@ -344,31 +401,44 @@ async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
         attributes: { ome },
       }),
     },
-    resolutions: Array.from({ length: meta.resolutions }, (_, resolution) => ({
-      sizes: {
-        ...meta.sizes,
-        y: meta.sizes.y >> resolution,
-        x: meta.sizes.x >> resolution,
-      },
-      zarrJson: encodeJson({
-        zarr_format: 3,
-        node_type: "array",
-        shape: [meta.sizes.t, meta.sizes.c, meta.sizes.z, meta.sizes.y >> resolution, meta.sizes.x >> resolution],
-        data_type: meta.dataType,
-        chunk_grid: {
-          name: "regular",
-          configuration: {
-            chunk_shape: [1, 1, 1, meta.tileSize, meta.tileSize],
+    resolutions: Array.from({ length: meta.resolutions }, (_, resolution) => {
+      const shape = activeAxes.map((axis) => {
+        switch (axis) {
+          case 't': return meta.sizes.t;
+          case 'c': return meta.sizes.c;
+          case 'z': return meta.sizes.z;
+          case 'y': return meta.sizes.y >> resolution;
+          case 'x': return meta.sizes.x >> resolution;
+        }
+      });
+      const chunkShape = activeAxes.map((axis) =>
+        (axis === 'y' || axis === 'x') ? meta.tileSize : 1
+      );
+      return {
+        sizes: {
+          ...meta.sizes,
+          y: meta.sizes.y >> resolution,
+          x: meta.sizes.x >> resolution,
+        },
+        zarrJson: encodeJson({
+          zarr_format: 3,
+          node_type: "array",
+          shape,
+          data_type: meta.dataType,
+          chunk_grid: {
+            name: "regular",
+            configuration: { chunk_shape: chunkShape },
           },
-        },
-        chunk_key_encoding: {
-          name: "default",
-          configuration: { separator: "/" },
-        },
-        codecs: [{ name: "bytes", configuration: { endian: "little" } }],
-        fill_value: null,
-      }),
-    })),
+          chunk_key_encoding: {
+            name: "default",
+            configuration: { separator: "/" },
+          },
+          codecs: [{ name: "bytes", configuration: { endian: "little" } }],
+          fill_value: 0,
+          attributes: {},
+        }),
+      };
+    }),
   };
 }
 
@@ -432,7 +502,7 @@ async function decompressTile(
     case Compression.DeflateOther: {
       const ds = new DecompressionStream("deflate");
       const writer = ds.writable.getWriter();
-      writer.write(tile.bytes);
+      writer.write(new Uint8Array(tile.bytes));
       writer.close();
       data = new Uint8Array(await new Response(ds.readable).arrayBuffer());
       break;
@@ -473,22 +543,37 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSigna
       if (keyResult.value.kind === "root") {
         return this.#context.root.zarrJson;
       }
-      let resolution = keyResult.value.value;
+      const resolution = keyResult.value.value;
       return this.#context.resolutions[resolution]?.zarrJson;
     }
-    let { tileSize, bytesPerPixel, predictor } = this.#context;
-    let { resolution, coords } = keyResult;
-    let sizes = this.#context.resolutions[resolution]?.sizes;
+    const { tileSize, bytesPerPixel, predictor, activeAxes } = this.#context;
+    const { resolution, chunkCoords } = keyResult;
+    const sizes = this.#context.resolutions[resolution]?.sizes;
     if (!sizes) {
       return undefined;
     }
-    const image = await this.#context.indexer(coords, resolution);
-    const tile = await image.getTile(coords.x, coords.y, { signal: options.signal });
+    // Map chunk coords (in collapsed-axis order) to TIFF t/c/z/y/x
+    const t = activeAxes.includes('t') ? chunkCoords[activeAxes.indexOf('t')] : 0;
+    const c = activeAxes.includes('c') ? chunkCoords[activeAxes.indexOf('c')] : 0;
+    const z = activeAxes.includes('z') ? chunkCoords[activeAxes.indexOf('z')] : 0;
+    const y = chunkCoords[activeAxes.indexOf('y')];
+    const x = chunkCoords[activeAxes.indexOf('x')];
+    const image = await this.#context.indexer({ t, c, z }, resolution);
+    const tile = await image.getTile(x, y, { signal: options.signal });
     if (!tile) {
       // Sparse / empty tile — return zeros
       return new Uint8Array(tileSize * tileSize * bytesPerPixel);
     }
     return decompressTile(tile, { tileSize, bytesPerPixel, predictor, isLittleEndian: this.#tiff.isLittleEndian });
+  }
+
+  async getRange(key: AbsolutePath, range: RangeQuery, options: { signal?: AbortSignal } = {}): Promise<Uint8Array | undefined> {
+    const data = await this.get(key, options);
+    if (data === undefined) return undefined;
+    if ('suffixLength' in range) {
+      return data.slice(Math.max(0, data.length - range.suffixLength));
+    }
+    return data.slice(range.offset, range.offset + range.length);
   }
 }
 

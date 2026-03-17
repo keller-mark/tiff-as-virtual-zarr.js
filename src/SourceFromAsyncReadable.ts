@@ -37,7 +37,7 @@ export class SourceFromAsyncReadable implements Source {
         if (this.internal_store.getRange) {
             const bytes = await this.internal_store.getRange('/', range, options);
             if (bytes === undefined) throw new SourceError(`Key '/' not found in store`, 404, this);
-            return bytes.buffer as ArrayBuffer;
+            return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
         }
         // Store doesn't support getRange, so we have to fetch the whole file and slice it ourselves.
         const allBytes = await this.internal_store.get('/', options);
