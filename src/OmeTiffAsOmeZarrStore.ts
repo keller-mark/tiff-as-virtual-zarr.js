@@ -1,31 +1,17 @@
-import { fromFile, fromUrl, GeoTIFFImage } from 'geotiff';
+import {
+  fromCustomClient,
+  GeoTIFFImage,
+  BaseClient,
+} from 'geotiff';
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
+import type { ImageSchema } from 'zod-ome-ngff/0.5';
+import type { z } from 'zod';
+import { type Pixels, type Channel, type DimensionOrder } from './ome-tiff-types.js';
+import { createOffsetsProxy } from './proxies.js';
+import { StoreTiffClient } from './geotiff-client.js';
+import { parseOmeXml, omeUnitToNgff, omeTypeToZarr, getRelativeIfdIndex, encodeJson } from './utils.js';
 
-// ── OME-XML types ────────────────────────────────────────────────────────────
-interface OmePixels {
-  DimensionOrder: string;
-  Type: string;
-  SizeX: number;
-  SizeY: number;
-  SizeZ: number;
-  SizeT: number;
-  SizeC: number;
-  PhysicalSizeX?: number;
-  PhysicalSizeXUnit?: string;
-  PhysicalSizeY?: number;
-  PhysicalSizeYUnit?: string;
-}
-
-interface OmeChannel {
-  Name?: string;
-}
-
-interface ParsedOmeXml {
-  pixels: OmePixels;
-  channels: OmeChannel[];
-}
-
-// ── Metadata for each scale level ───────────────────────────────────────────
+// ── Metadata for each scale level ────────────────────────────────────────────
 interface ScaleInfo {
   shape: number[];       // full array shape at this scale [dim0, ..., Y, X]
   tileShape: number[];   // chunk shape [1, ..., 1, tileH, tileW]
@@ -36,76 +22,15 @@ interface ScaleInfo {
 
 // ── Parsed TIFF structure ────────────────────────────────────────────────────
 interface TiffMeta {
-  ome: ParsedOmeXml;
-  activeDims: string[];          // non-singleton non-spatial dims, outermost first
+  pixels: Pixels;
+  activeDims: string[];                        // non-singleton non-spatial dims, outermost first
   activeSizes: number[];
-  nonSpatialOrderFastToSlow: string[];  // e.g. ['C','Z','T'] for DimOrder XYCZT
+  nonSpatialOrderFastToSlow: string[];         // e.g. ['C','Z','T'] for DimOrder XYCZT
   nonSpatialSizes: Record<string, number>;
   scales: ScaleInfo[];
   numScales: number;
-  channels: OmeChannel[];
-}
-
-// ── Minimal OME-XML parser ────────────────────────────────────────────────────
-function getAttr(str: string, name: string): string | undefined {
-  const m = str.match(new RegExp(`\\b${name}="([^"]*)"`));
-  return m ? m[1] : undefined;
-}
-
-function parseOmeXml(xml: string): ParsedOmeXml {
-  const pixelsMatch = xml.match(/<Pixels([^>]*)>/);
-  if (!pixelsMatch) throw new Error('No Pixels element in OME-XML');
-  const p = pixelsMatch[1];
-
-  const pixels: OmePixels = {
-    DimensionOrder: getAttr(p, 'DimensionOrder') ?? 'XYCZT',
-    Type: getAttr(p, 'Type') ?? 'uint8',
-    SizeX: parseInt(getAttr(p, 'SizeX') ?? '0'),
-    SizeY: parseInt(getAttr(p, 'SizeY') ?? '0'),
-    SizeZ: parseInt(getAttr(p, 'SizeZ') ?? '1'),
-    SizeT: parseInt(getAttr(p, 'SizeT') ?? '1'),
-    SizeC: parseInt(getAttr(p, 'SizeC') ?? '1'),
-    PhysicalSizeX: getAttr(p, 'PhysicalSizeX') != null ? parseFloat(getAttr(p, 'PhysicalSizeX')!) : undefined,
-    PhysicalSizeXUnit: getAttr(p, 'PhysicalSizeXUnit'),
-    PhysicalSizeY: getAttr(p, 'PhysicalSizeY') != null ? parseFloat(getAttr(p, 'PhysicalSizeY')!) : undefined,
-    PhysicalSizeYUnit: getAttr(p, 'PhysicalSizeYUnit'),
-  };
-
-  const channels: OmeChannel[] = [];
-  const channelRegex = /<Channel([^>]*?)(?:\/?>)/g;
-  let m: RegExpExecArray | null;
-  while ((m = channelRegex.exec(xml)) !== null) {
-    channels.push({ Name: getAttr(m[1], 'Name') });
-  }
-
-  return { pixels, channels };
-}
-
-// ── Type conversion ───────────────────────────────────────────────────────────
-function omeTypeToZarr(omeType: string): string {
-  const map: Record<string, string> = {
-    uint8: 'uint8', uint16: 'uint16', uint32: 'uint32',
-    int8: 'int8', int16: 'int16', int32: 'int32',
-    float: 'float32', double: 'float64',
-    bit: 'uint8',
-  };
-  return map[omeType] ?? 'uint8';
-}
-
-// ── IFD index calculation ─────────────────────────────────────────────────────
-function getIfdIndex(
-  sel: { t: number; z: number; c: number },
-  nonSpatialOrderFastToSlow: string[],
-  nonSpatialSizes: Record<string, number>
-): number {
-  const vals: Record<string, number> = { T: sel.t, Z: sel.z, C: sel.c };
-  let index = 0;
-  let stride = 1;
-  for (const dim of nonSpatialOrderFastToSlow) {
-    index += vals[dim] * stride;
-    stride *= nonSpatialSizes[dim];
-  }
-  return index;
+  channels: Channel[];
+  interleaved: boolean;
 }
 
 // ── Main store class ──────────────────────────────────────────────────────────
@@ -119,12 +44,19 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     this._tiff = tiff;
   }
 
-  static async fromFile(path: string): Promise<OmeTiffAsOmeZarrStore> {
-    return new OmeTiffAsOmeZarrStore(await fromFile(path));
-  }
-
-  static async fromUrl(url: string, options?: Record<string, any>): Promise<OmeTiffAsOmeZarrStore> {
-    return new OmeTiffAsOmeZarrStore(await fromUrl(url, options));
+  /**
+   * Create a store from an AsyncReadable that serves the raw TIFF bytes at
+   * key '/'.  The full TIFF is buffered in memory on first access; for
+   * large remote TIFFs prefer `fromUrl` so geotiff can issue true HTTP Range
+   * requests instead.
+   */
+  static async fromStore(
+    store: AsyncReadable,
+    offsets?: number[],
+  ): Promise<OmeTiffAsOmeZarrStore> {
+    const client = new StoreTiffClient(store) as unknown as BaseClient;
+    const tiff = await fromCustomClient(client);
+    return new OmeTiffAsOmeZarrStore(offsets ? createOffsetsProxy(tiff, offsets) : tiff);
   }
 
   // ── AsyncReadable interface ────────────────────────────────────────────────
@@ -158,17 +90,11 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
 
   async getRange(key: AbsolutePath, range: RangeQuery): Promise<Uint8Array | undefined> {
     const full = await this.get(key);
-    if (full === undefined) return undefined;
-    let start: number;
-    let end: number;
-    if ('offset' in range) {
-      start = range.offset;
-      end = range.offset + range.length;
-    } else {
-      start = Math.max(0, full.length - range.suffixLength);
-      end = full.length;
+    if (!full) return undefined;
+    if ('suffixLength' in range) {
+      return full.slice(Math.max(0, full.length - range.suffixLength));
     }
-    return full.slice(start, end);
+    return full.slice(range.offset, range.offset + range.length);
   }
 
   // ── Metadata initialisation ────────────────────────────────────────────────
@@ -180,8 +106,7 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     this._imgCache.set('0:0', img0);
 
     const fd0 = img0.fileDirectory;
-    const ome = parseOmeXml(fd0.ImageDescription ?? '');
-    const { pixels } = ome;
+    const { pixels, channels } = await parseOmeXml(fd0.ImageDescription ?? '');
 
     const dataType = omeTypeToZarr(pixels.Type);
     const baseW: number = fd0.ImageWidth;
@@ -189,8 +114,8 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     const tileW: number = fd0.TileWidth ?? baseW;
     const tileH: number = fd0.TileLength ?? (fd0.RowsPerStrip ?? baseH);
 
-    const dimOrderUpper = pixels.DimensionOrder.toUpperCase();
-    const nonSpatialOrderFastToSlow = dimOrderUpper.slice(2).split('') as string[];
+    const dimOrderUpper = pixels.DimensionOrder.toUpperCase() as DimensionOrder;
+    const nonSpatialOrderFastToSlow = dimOrderUpper.slice(2).split('');
     const nonSpatialSizes: Record<string, number> = {
       T: pixels.SizeT, Z: pixels.SizeZ, C: pixels.SizeC,
     };
@@ -238,14 +163,15 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     }
 
     this._meta = {
-      ome,
+      pixels,
       activeDims,
       activeSizes,
       nonSpatialOrderFastToSlow,
       nonSpatialSizes,
       scales,
       numScales,
-      channels: ome.channels,
+      channels,
+      interleaved: pixels.Interleaved,
     };
     return this._meta;
   }
@@ -280,13 +206,16 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
 
   // ── Zarr metadata builders ─────────────────────────────────────────────────
 
-  private _buildRootZarrJson(meta: TiffMeta): object {
-    const { pixels } = meta.ome;
-    const physX = pixels.PhysicalSizeX ?? 1.0;
-    const physY = pixels.PhysicalSizeY ?? 1.0;
-    const unit = pixels.PhysicalSizeXUnit;
+  private _buildRootZarrJson(
+    meta: TiffMeta,
+  ): { zarr_format: number; node_type: string; attributes: z.infer<typeof ImageSchema> } {
+    const { pixels } = meta;
+    const physX = pixels.PhysicalSizeX || 1.0;
+    const physY = pixels.PhysicalSizeY || 1.0;
+    const unit = omeUnitToNgff(pixels.PhysicalSizeXUnit);
 
-    const axes: object[] = [];
+    type Axis = { name: string; type: string; unit?: string };
+    const axes: Axis[] = [];
     for (const d of meta.activeDims) {
       if (d === 't') axes.push({ name: 't', type: 'time' });
       else if (d === 'c') axes.push({ name: 'c', type: 'channel' });
@@ -300,7 +229,7 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
       coordinateTransformations: [
         {
           type: 'scale',
-          scale: axes.map((ax: any) => {
+          scale: axes.map((ax) => {
             if (ax.name === 'y') return physY * s.scaleFactorY;
             if (ax.name === 'x') return physX * s.scaleFactorX;
             return 1.0;
@@ -309,18 +238,30 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
       ],
     }));
 
-    const omeroChannels = meta.channels.map((ch) => ({ label: ch.Name, active: true }));
+    const omeroChannels = meta.channels.map((ch) => ({
+      label: ch.Name,
+      active: true,
+      ...(ch.Color
+        ? {
+            color: `#${ch.Color.slice(0, 3)
+              .map((v) => v.toString(16).padStart(2, '0'))
+              .join('')}`,
+          }
+        : {}),
+    }));
+
+    const omeContent: Record<string, any> = {
+      version: '0.5',
+      multiscales: [{ axes, datasets, name: '/' }],
+    };
+    if (omeroChannels.length > 0) {
+      omeContent.omero = { channels: omeroChannels };
+    }
 
     return {
       zarr_format: 3,
       node_type: 'group',
-      attributes: {
-        ome: {
-          version: '0.5',
-          multiscales: [{ axes, datasets, name: '/' }],
-          ...(omeroChannels.length > 0 ? { omero: { channels: omeroChannels } } : {}),
-        },
-      },
+      attributes: { ome: omeContent },
     };
   }
 
@@ -369,10 +310,10 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
       else if (d === 'C') c = nonSpatialCoords[i];
     }
 
-    const baseIfdIndex = getIfdIndex(
+    const baseIfdIndex = getRelativeIfdIndex(
       { t, z, c },
-      meta.nonSpatialOrderFastToSlow,
-      meta.nonSpatialSizes
+      meta.pixels.DimensionOrder,
+      { t: meta.nonSpatialSizes['T'], z: meta.nonSpatialSizes['Z'], c: meta.nonSpatialSizes['C'] },
     );
 
     const geoImg = await this._getGeoImg(scale, baseIfdIndex);
@@ -389,13 +330,18 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
 
     if (x0 >= imageW || y0 >= imageH) return undefined;
 
+    const interleave = meta.interleaved;
     const rasters: any = await geoImg.readRasters({
       window: [x0, y0, x1, y1],
-      samples: [0],
-      interleave: false,
+      interleave,
     });
 
-    const rasterData: ArrayBufferView & { BYTES_PER_ELEMENT: number } = rasters[0];
+    // For non-interleaved TIFFs (the common OME-TIFF case), geotiff returns an
+    // array of typed arrays (one per sample); we want sample 0.
+    // For interleaved TIFFs, readRasters returns the typed array directly.
+    const rasterData: ArrayBufferView & { BYTES_PER_ELEMENT: number } =
+      interleave ? rasters : rasters[0];
+
     const actualW = x1 - x0;
     const actualH = y1 - y0;
 
@@ -424,9 +370,4 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
     }
     return out;
   }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function encodeJson(obj: object): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(obj));
 }
