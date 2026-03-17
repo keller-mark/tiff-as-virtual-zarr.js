@@ -1,13 +1,12 @@
 # tiff-as-virtual-zarr.js
 
-This is an effort to read and write OME-TIFF data via the Zarr store interface.
-In other words, given an OME-TIFF file, we want to conceptually/virtually mapping OME-TIFF tiles and resolutions to Zarr chunks and OME-Zarr multiscales.
-We will translate OME-XML metadata to OME-NGFF metadata.
+Read OME-TIFF data via the Zarr store interface, with "virtualized" OME-NGFF metadata.
+In other words, given an OME-TIFF file, we want to conceptually/virtually map the image tiles and pyramid resolutions to Zarr chunks and OME-Zarr multiscales.
+We translate OME-XML metadata to OME-NGFF metadata.
 
+For now, we only support the single-file OME-TIFF use case, and we translate metadata to OME-NGFF v0.5.
 
-For now, we only support the single-file OME-TIFF use case.
-
-The implementation is based heavily on Viv's TiffPixelSource and its related utilities.
+The implementation was originally based on [Viv](https://github.com/hms-dbmi/viv)'s TiffPixelSource ([696f1d52](https://github.com/keller-mark/tiff-as-virtual-zarr.js/blob/696f1d523c63e2af3a4e9c674bb220ec833acf8e/src/OmeTiffAsOmeZarrStore.ts)) but is now based on [Vizarr](https://github.com/hms-dbmi/vizarr)'s [OmeTiffStore](https://github.com/hms-dbmi/vizarr/blob/main/src/ome-tiff-store.ts).
 
 ## Development
 
@@ -45,7 +44,10 @@ This key identifies a particular tile in the multidimensional array representing
   - https://github.com/tlambert03/ome-writers/blob/6f14f841700a0586f57e9e518123baa4756a497b/src/ome_writers/_backends/_live_tiff_store.py
 - https://github.com/keller-mark/hdf5-as-virtual-zarr.js
 
+## Citation
 
------
+Cite the Viv paper if you use this code:
 
-Note: This is not an effort to read Zarr as TIFF (the reverse).
+> Trevor Manz, Ilan Gold, Nathan Heath Patterson, Chuck McCallum, Mark S Keller, Bruce W Herr II, Katy Börner, Jeffrey M Spraggins, Nils Gehlenborg,
+> "[Viv: multiscale visualization of high-resolution multiplexed bioimaging data on the web](https://www.nature.com/articles/s41592-022-01482-7)."
+> **Nature Methods** (2022), [doi:10.31219/10.1038/s41592-022-01482-7](https://doi.org/10.1038/s41592-022-01482-7)
