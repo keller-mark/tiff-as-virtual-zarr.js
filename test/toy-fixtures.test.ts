@@ -74,6 +74,7 @@ describe('OmeTiffAsOmeZarrStore – toy OME-TIFF (CYX uint8, 3×128×128)', () =
     const tiffData = await zarrGet(tiffArr, [0, slice(0, 128), slice(0, 128)]);
     const refData = await zarrGet(refArr, [0, slice(0, 128), slice(0, 128)]);
     expect(tiffData.data).toEqual(refData.data);
+    const dToy0 = tiffData.data as any; let sumToy0 = 0; for (let i = 0; i < dToy0.length; i++) sumToy0 += dToy0[i]; expect(sumToy0).toBe(1143443);
   });
 
   it('scale-0 pixel values match reference zarr for channel 1 (GFP)', async () => {
@@ -84,6 +85,7 @@ describe('OmeTiffAsOmeZarrStore – toy OME-TIFF (CYX uint8, 3×128×128)', () =
     const tiffData = await zarrGet(tiffArr, [1, slice(0, 128), slice(0, 128)]);
     const refData = await zarrGet(refArr, [1, slice(0, 128), slice(0, 128)]);
     expect(tiffData.data).toEqual(refData.data);
+    const dToy1 = tiffData.data as any; let sumToy1 = 0; for (let i = 0; i < dToy1.length; i++) sumToy1 += dToy1[i]; expect(sumToy1).toBe(1143443);
   });
 
   it('scale-0 pixel values match reference zarr for channel 2 (Brightfield)', async () => {
@@ -94,6 +96,7 @@ describe('OmeTiffAsOmeZarrStore – toy OME-TIFF (CYX uint8, 3×128×128)', () =
     const tiffData = await zarrGet(tiffArr, [2, slice(0, 128), slice(0, 128)]);
     const refData = await zarrGet(refArr, [2, slice(0, 128), slice(0, 128)]);
     expect(tiffData.data).toEqual(refData.data);
+    const dToy2 = tiffData.data as any; let sumToy2 = 0; for (let i = 0; i < dToy2.length; i++) sumToy2 += dToy2[i]; expect(sumToy2).toBe(1143388);
   });
 });
 

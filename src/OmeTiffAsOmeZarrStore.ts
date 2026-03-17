@@ -132,7 +132,6 @@ type Context = {
 async function resolveMetadata(tiff: Tiff) {
   const image = tiff.images[0];
   const subIfds = (await image.fetch(TiffTag.SubIFDs)) as number[] | null;
-  assert(subIfds, "Only support bioformats >6");
   // cogeotiff decodes ASCII tags with String.fromCharCode (Latin-1), but OME-XML is UTF-8.
   // Re-encode as bytes and decode as UTF-8 so multibyte characters like µ are correct.
   const rawLatin1 = String(await image.fetch(TiffTag.ImageDescription));
@@ -205,6 +204,17 @@ async function resolveMetadata(tiff: Tiff) {
   const predictor = image.value(TiffTag.Predictor) ?? Predictor.None;
 
   const sizes = { t: sizeT, c: sizeC, z: sizeZ, y: sizeY, x: sizeX };
+  let resolutions: number;
+  if (subIfds) {
+    // Modern bioformats 6+: sub-IFDs on each base image hold the pyramid levels.
+    resolutions = subIfds.length - 1;
+  } else {
+    // Legacy bioformats (<6): pyramid levels are stored as sequential IFDs after
+    // the base-resolution IFDs.  The main IFD chain has ifdPerLevel * numLevels
+    // entries where ifdPerLevel = T * C * Z.
+    const ifdPerLevel = sizeT * sizeC * sizeZ;
+    resolutions = Math.max(1, Math.floor(tiff.images.length / ifdPerLevel));
+  }
   return {
     raw,
     dimensionOrder,
@@ -212,7 +222,8 @@ async function resolveMetadata(tiff: Tiff) {
     name,
     sizes,
     omero,
-    resolutions: subIfds.length - 1,
+    resolutions,
+    isLegacy: !subIfds,
     tileSize: getTileSize(image),
     bytesPerPixel,
     predictor,
@@ -270,17 +281,25 @@ async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
   };
 
   const subIfdCache = new Map<number, TiffImage>();
+  const ifdPerLevel = meta.sizes.t * meta.sizes.c * meta.sizes.z;
   return {
     tileSize: meta.tileSize,
     bytesPerPixel: meta.bytesPerPixel,
     predictor: meta.predictor,
     activeAxes,
     async indexer(coords: { z: number; c: number; t: number }, resolution: number) {
-      const baseImage = tiff.images[getRelativeOmeIfdIndex(coords, meta)];
+      const baseIfdIndex = getRelativeOmeIfdIndex(coords, meta);
+      const baseImage = tiff.images[baseIfdIndex];
 
       // It's the highest resolution, no need to look up SubIFDs.
       if (resolution === 0) {
         return baseImage;
+      }
+
+      if (meta.isLegacy) {
+        // Legacy bioformats (<6): pyramid levels are sequential IFDs after the
+        // base-resolution block.
+        return tiff.images[baseIfdIndex + resolution * ifdPerLevel];
       }
 
       const subIfdOffsets = (await baseImage.fetch(TiffTag.SubIFDs)) as number[];

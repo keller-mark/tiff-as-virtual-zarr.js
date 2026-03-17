@@ -53,6 +53,7 @@ describe('TiffAsOmeZarrStore – 9836842 v0.3 plain TIFF (grayscale uint16)', ()
     const plainData = await zarrGet(plainArr, [slice(0, 256), slice(0, 256)]);
     const refData = await zarrGet(refArr, [0, slice(0, 256), slice(0, 256)]);
     expect(plainData.data).toEqual(refData.data);
+    const d9_plain = plainData.data as any; let sum9_plain = 0; for (let i = 0; i < d9_plain.length; i++) sum9_plain += d9_plain[i]; expect(sum9_plain).toBe(15036502);
   });
 });
 
@@ -101,6 +102,7 @@ describe('TiffAsOmeZarrStore – 10501752 v0.4 plain TIFF (grayscale float64)', 
     const plainData = await zarrGet(plainArr, [slice(0, 256), slice(0, 256)]);
     const refData = await zarrGet(refArr, [0, slice(0, 256), slice(0, 256)]);
     expect(plainData.data).toEqual(refData.data);
+    const d10_plain = plainData.data as any; let sum10_plain = 0; for (let i = 0; i < d10_plain.length; i++) sum10_plain += d10_plain[i]; expect(sum10_plain).toBeCloseTo(253309.998, 2);
   });
 });
 
@@ -151,5 +153,6 @@ describe('TiffAsOmeZarrStore – ExpD_chicken_embryo_MIP v0.5 plain TIFF (graysc
     const plainData = await zarrGet(plainArr, [slice(0, 256), slice(0, 256)]);
     const refData = await zarrGet(refArr, [slice(0, 256), slice(0, 256)]);
     expect(plainData.data).toEqual(refData.data);
+    const dExpD_plain = plainData.data as any; let sumExpD_plain = 0; for (let i = 0; i < dExpD_plain.length; i++) sumExpD_plain += dExpD_plain[i]; expect(sumExpD_plain).toBe(6360);
   });
 });

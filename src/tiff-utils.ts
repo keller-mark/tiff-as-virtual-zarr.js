@@ -152,7 +152,7 @@ export async function loadSubIfd(tiff: Tiff, offset: number): Promise<TiffImage>
 }
 
 export function getTileSize(image: TiffImage): number {
-  const { width, height } = image.tileSize;
+  const { width, height } = image.isTiled() ? image.tileSize : image.size;
   const size = Math.min(width, height);
   // deck.gl requirement for power-of-two tile size.
   return 2 ** Math.floor(Math.log2(size));
