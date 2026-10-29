@@ -359,7 +359,7 @@ async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
   };
 }
 
-export class OmeTiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSignal }> {
+export class OmeTiffAsOmeZarrStore implements AsyncReadable {
   #tiff: Tiff;
   #context: Context | undefined = undefined;
 

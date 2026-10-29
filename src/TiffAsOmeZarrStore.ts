@@ -190,7 +190,7 @@ async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
   };
 }
 
-export class TiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSignal }> {
+export class TiffAsOmeZarrStore implements AsyncReadable {
   #tiff: Tiff;
   #context: PlainContext | undefined = undefined;
 
