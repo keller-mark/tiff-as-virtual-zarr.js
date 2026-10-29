@@ -114,10 +114,36 @@ Clients compare metadata as parsed JSON, not as bytes. Whitespace and key order 
 
 Chunk *(level r, coordinates i)* maps to exactly **one TIFF segment** in **one IFD**. The store-specific sections define how to find that IFD and segment.
 
-Two strategies are allowed for serving the payload. The `codecs` array in §2.5 MUST match the strategy the store uses.
+Two strategies are allowed for serving the payload. The store picks one per array (level), using that level's first-plane IFD. The `codecs` array in §2.5 MUST match the strategy chosen. A store MUST NOT mix strategies within one array.
 
-**Strategy A — decode in the store (the reference implementation does this).**
-The store reads the segment bytes and then:
+**Strategy A (pass-through) is preferred.** It serves the bytes exactly as stored in the TIFF, so the store does no decompression. Decoding then happens in the Zarr client, using the same codec pipeline it uses for real OME-Zarr data. Strategy B (decode in the store) is the fallback for arrays whose encoding has no Zarr v3 equivalent. The reference implementation follows this rule: Strategy A wherever it is allowed, Strategy B everywhere else.
+
+#### Strategy A — pass compressed bytes through (preferred)
+
+The store returns the raw segment bytes unchanged and declares the codec chain that decodes them:
+
+| TIFF `Compression` | Zarr v3 `codecs` |
+| --- | --- |
+| 1 | `[{"name": "bytes", "configuration": {"endian": E}}]` |
+| 8, 32946 | `[{"name": "bytes", …}, {"name": "zlib", "configuration": {"level": 1}}]`* |
+| 50000 | `[{"name": "bytes", …}, {"name": "zstd", "configuration": {"level": 0, "checksum": false}}]` |
+
+`E` is `"little"` for `II` files and `"big"` for `MM` files. Codec `level` values only affect encoding, so their exact values don't matter for reading.
+
+\* `zlib` is not a core Zarr v3 codec. zarrita registers it (and `zstd`) by default, but other readers may ship only `gzip` or name it `numcodecs.zlib`. Only use Strategy A with codecs the target clients support.
+
+A store SHOULD use Strategy A for every array that meets all of the following conditions, and MUST NOT use it for any array that doesn't:
+
+- Its compression appears in the table above. LZW, JPEG, LERC and others have no Zarr v3 equivalent.
+- `Predictor = 1`. Zarr v3 has no codec for TIFF's per-row predictors.
+- Its segments are not sample-interleaved (`spp = 1`). A `transpose` codec with `order: [1, 2, 0]` can describe `(y, x, s)` segments as a `(c, y, x)` array. But readers such as zarrita then return arrays in that non-C memory order, which a real OME-Zarr image would not produce, so interleaved arrays MUST use Strategy B.
+- Every segment decodes to exactly the chunk size. Compressed final strips shorter than `RowsPerStrip` rule this out, because they can't be padded without re-encoding. Uncompressed short strips MAY still be passed through, zero-padded to the full chunk size.
+
+Every plane of the array MUST share the compression and predictor that the strategy was chosen from. A chunk request that finds otherwise MUST fail with an error.
+
+#### Strategy B — decode in the store (fallback)
+
+Use this for any array that doesn't qualify for Strategy A. The store reads the segment bytes and then:
 
 1. **Decompresses** them according to TIFF `Compression` (tag 259). Implementations MUST support `1` (none), `5` (LZW), `8` and `32946` (Deflate/zlib). They MAY support others (e.g. `50000` zstd, `34887` LERC), and MUST fail with a clear error on any they don't support.
 2. **Reverses the predictor** (tag 317). Let `spp` be the number of samples interleaved per pixel in the segment (§2.6.1), `bps = BitsPerSample / 8`, and `rowSamples = segmentWidth × spp`. Each row is processed independently:
@@ -130,20 +156,9 @@ The store reads the segment bytes and then:
 
 The codec chain is then just `[{"name": "bytes", "configuration": {"endian": "little"}}]`.
 
-**Strategy B — pass compressed bytes through (OPTIONAL optimisation).**
-If the TIFF compression has an equivalent Zarr v3 codec, and no predictor or byte swap is needed (or it can be expressed as a codec), the store MAY return the raw segment bytes unchanged and declare the matching codec chain:
+#### Sparse / missing segments
 
-| TIFF `Compression` | Zarr v3 `codecs` |
-| --- | --- |
-| 1 | `[bytes]` |
-| 8, 32946 | `[bytes, {"name": "zlib", …}]`* |
-| 50000 | `[bytes, {"name": "zstd", …}]` |
-
-\* `zlib` is not a core Zarr v3 codec, and many readers only ship `gzip`. Only use Strategy B with codecs the target clients support. The `bytes` codec's `endian` MUST match the TIFF header byte order.
-
-Strategy B is not allowed when segment shapes differ from the declared chunk shape, e.g. unpadded final strips. A store MUST NOT mix strategies within one array.
-
-**Sparse / missing segments.** If a segment's byte count is 0 (or its offset is 0), the chunk MUST be served as an all-`fill_value` buffer of full chunk size (Strategy A). Alternatively it MAY be reported *absent*, which Zarr readers interpret as `fill_value`.
+If a segment's byte count is 0 (or its offset is 0), a Strategy A chunk MUST be reported *absent*, which Zarr readers interpret as `fill_value`, because there are no encoded bytes to return. A Strategy B chunk MUST be served as an all-`fill_value` buffer of full chunk size.
 
 #### 2.6.1 Interleaved samples
 
@@ -330,7 +345,7 @@ Let `S = SamplesPerPixel`.
 | Condition | Active axes | Notes |
 | --- | --- | --- |
 | `S = 1` | `y, x` | Grayscale |
-| `S > 1` and `PlanarConfiguration = 1` | `c, y, x` | Chunky / interleaved (e.g. RGB). One segment holds every sample, so one chunk spans the whole `c` axis. The store de-interleaves each segment from `(y, x, s)` to `(c, y, x)` order (§2.6, step 5). |
+| `S > 1` and `PlanarConfiguration = 1` | `c, y, x` | Chunky / interleaved (e.g. RGB). One segment holds every sample, so one chunk spans the whole `c` axis. The store de-interleaves each segment from `(y, x, s)` to `(c, y, x)` order (§2.6, Strategy B, step 5). |
 | `S > 1` and `PlanarConfiguration = 2` | `c, y, x` | Planar. Sample planes are stored separately. |
 
 Axis entries: `y`, `x` → `{"type": "space"}`, `c` → `{"type": "channel"}`. Samples always form a leading `channel` axis, because OME-NGFF v0.5 requires channel axes to come before space axes.
@@ -396,4 +411,3 @@ The reference implementation (`src/`) follows every MUST in this specification. 
 | Planar IFD-per-plane (§4.5) | MAY detect sample planes stored in separate IFDs | Only same-IFD segment runs (the TIFF 6.0 layout) |
 | Strip offset reads (§2.3) | SHOULD fetch only the needed offset/byte-count entries | Loads the full `StripOffsets`/`StripByteCounts` arrays on first use (tile offsets are read per entry) |
 | Compression (§2.6) | MAY support codecs beyond none/LZW/Deflate | Also supports zstd (50000). No LERC, JPEG, or WebP. |
-| Strategy B (§2.6) | MAY pass compressed bytes through | Always decodes in the store (Strategy A) |

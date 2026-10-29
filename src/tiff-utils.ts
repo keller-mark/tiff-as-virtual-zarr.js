@@ -1,6 +1,6 @@
 import { Compression, Predictor, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
 import { decompress } from "@developmentseed/lzw-tiff-decoder";
-import { decompress as zstdDecompress } from "fzstd";
+import { registry } from "zarrita";
 import type { AbsolutePath } from '@zarrita/storage';
 
 /**
@@ -161,6 +161,25 @@ export async function readSegment(
   return { bytes: segment.bytes, compression: segment.compression };
 }
 
+/** Zarr v3 codec metadata for zstd, shared by passthrough arrays and in-store decoding. */
+const ZSTD_CODEC = { name: "zstd", configuration: { level: 0, checksum: false } };
+
+let zstdCodec: Promise<{ decode(bytes: Uint8Array): Promise<Uint8Array> | Uint8Array }> | undefined;
+
+/**
+ * Decode zstd with the codec registered in zarrita's registry, i.e. the same
+ * implementation zarrita uses for passthrough zstd chunks.
+ */
+function getZstdCodec() {
+  zstdCodec ??= (async () => {
+    const Codec = await registry.get(ZSTD_CODEC.name)?.();
+    assert(Codec, `No "${ZSTD_CODEC.name}" codec registered in zarrita`);
+    // biome-ignore lint/suspicious/noExplicitAny: bytes-to-bytes codecs ignore the array metadata
+    return Codec.fromConfig(ZSTD_CODEC.configuration, {} as any) as any;
+  })();
+  return zstdCodec;
+}
+
 async function decompressBytes(bytes: ArrayBuffer, compression: Compression, maxUncompressedSize: number): Promise<Uint8Array> {
   switch (compression) {
     case Compression.None:
@@ -176,7 +195,7 @@ async function decompressBytes(bytes: ArrayBuffer, compression: Compression, max
       return new Uint8Array(await new Response(ds.readable).arrayBuffer());
     }
     case Compression.Zstd:
-      return zstdDecompress(new Uint8Array(bytes));
+      return (await getZstdCodec()).decode(new Uint8Array(bytes));
     default:
       throw new Error(`Unsupported compression: ${compression}`);
   }
@@ -366,8 +385,120 @@ export function createSubIfdResolver(tiff: Tiff) {
   };
 }
 
+type CodecMetadata = { name: string; configuration?: Record<string, unknown> };
+
+/**
+ * TIFF compressions whose segments can be served as-is, mapped to the
+ * equivalent Zarr v3 bytes-to-bytes codec (null: no compression codec).
+ */
+const PASSTHROUGH_COMPRESSION_CODECS = new Map<Compression, CodecMetadata | null>([
+  [Compression.None, null],
+  [Compression.DeflateOther, { name: "zlib", configuration: { level: 1 } }],
+  [Compression.Deflate, { name: "zlib", configuration: { level: 1 } }],
+  [Compression.Zstd, ZSTD_CODEC],
+]);
+
+/**
+ * How the chunks of one virtual array are encoded.
+ *
+ * - `passthrough`: raw TIFF segment bytes are returned unchanged and `codecs`
+ *   describes them (bytes with the file's endianness, then the decompression
+ *   codec).
+ * - `decode`: segments are decoded in the store (see `decodeSegment`) because
+ *   their compression or predictor has no Zarr v3 codec equivalent, because a
+ *   compressed final strip is shorter than the chunk and cannot be padded, or
+ *   because samples are interleaved. Interleaved (y, x, c) segments could be
+ *   described with a transpose codec, but readers such as zarrita then return
+ *   non-C-ordered arrays, unlike a real OME-Zarr image.
+ */
+export type ChunkEncoding = {
+  kind: "passthrough" | "decode";
+  compression: Compression;
+  codecs: CodecMetadata[];
+};
+
+export function planChunkEncoding(
+  image: TiffImage,
+  layout: SegmentLayout,
+  options: { isLittleEndian: boolean; samplesPerPixel: number },
+): ChunkEncoding {
+  const compression = (image.value(TiffTag.Compression) ?? Compression.None) as Compression;
+  const predictor = image.value(TiffTag.Predictor) ?? Predictor.None;
+  const compressionCodec = PASSTHROUGH_COMPRESSION_CODECS.get(compression);
+  const hasShortStrip = layout.kind === "stripped" && layout.height % layout.segmentHeight !== 0;
+  const canPassThrough =
+    compressionCodec !== undefined &&
+    predictor === Predictor.None &&
+    options.samplesPerPixel === 1 &&
+    !(hasShortStrip && compression !== Compression.None);
+
+  if (!canPassThrough) {
+    return { kind: "decode", compression, codecs: [{ name: "bytes", configuration: { endian: "little" } }] };
+  }
+  return {
+    kind: "passthrough",
+    compression,
+    codecs: [
+      { name: "bytes", configuration: { endian: options.isLittleEndian ? "little" : "big" } },
+      ...(compressionCodec ? [compressionCodec] : []),
+    ],
+  };
+}
+
+/**
+ * Read segment `index` of an IFD and return it as an encoded Zarr chunk
+ * according to `encoding`. Returns undefined for sparse segments in
+ * passthrough mode (Zarr readers then use the fill value).
+ *
+ * `samplesPerPixel` is the number of interleaved samples per pixel in the
+ * segment (1 for grayscale or planar-separate data).
+ */
+export async function readChunk(
+  image: TiffImage,
+  index: number,
+  options: {
+    encoding: ChunkEncoding;
+    layout: SegmentLayout;
+    samplesPerPixel: number;
+    bytesPerSample: number;
+    isLittleEndian: boolean;
+    signal?: AbortSignal;
+  },
+): Promise<Uint8Array | undefined> {
+  const { encoding, layout, samplesPerPixel, bytesPerSample, isLittleEndian } = options;
+  const pixels = layout.segmentWidth * layout.segmentHeight;
+  const chunkBytes = pixels * samplesPerPixel * bytesPerSample;
+  const predictor = image.value(TiffTag.Predictor) ?? Predictor.None;
+  const segment = await readSegment(image, index, { signal: options.signal });
+
+  if (encoding.kind === "passthrough") {
+    assert(
+      predictor === Predictor.None && (!segment || segment.compression === encoding.compression),
+      `IFD ${image.id} compression/predictor differs from the rest of its array`,
+    );
+    if (!segment) return undefined;
+    const bytes = new Uint8Array(segment.bytes);
+    // Only uncompressed final strips can be short in passthrough mode.
+    if (bytes.length >= chunkBytes || encoding.compression !== Compression.None) return bytes;
+    const padded = new Uint8Array(chunkBytes);
+    padded.set(bytes);
+    return padded;
+  }
+
+  if (!segment) return new Uint8Array(chunkBytes);
+  const data = await decodeSegment(segment, {
+    segmentWidth: layout.segmentWidth,
+    segmentHeight: layout.segmentHeight,
+    samplesPerPixel,
+    bytesPerSample,
+    predictor,
+    isLittleEndian,
+  });
+  return samplesPerPixel > 1 ? deinterleave(data, { pixels, samplesPerPixel, bytesPerSample }) : data;
+}
+
 /** Zarr v3 array metadata for a virtual array. */
-export function arrayZarrJson(options: { shape: number[]; chunkShape: number[]; dataType: string }): Uint8Array {
+export function arrayZarrJson(options: { shape: number[]; chunkShape: number[]; dataType: string; codecs: CodecMetadata[] }): Uint8Array {
   return encodeJson({
     zarr_format: 3,
     node_type: "array",
@@ -381,7 +512,7 @@ export function arrayZarrJson(options: { shape: number[]; chunkShape: number[]; 
       name: "default",
       configuration: { separator: "/" },
     },
-    codecs: [{ name: "bytes", configuration: { endian: "little" } }],
+    codecs: options.codecs,
     fill_value: 0,
     attributes: {},
   });

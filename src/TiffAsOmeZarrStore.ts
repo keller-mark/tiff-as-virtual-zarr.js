@@ -1,4 +1,4 @@
-import { PlanarConfiguration, Predictor, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
+import { PlanarConfiguration, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
 import { SourceFromAsyncReadable } from "./SourceFromAsyncReadable.js";
 import {
@@ -6,15 +6,15 @@ import {
   arrayZarrJson,
   consolidateMetadata,
   createSubIfdResolver,
-  decodeSegment,
-  deinterleave,
   encodeJson,
   getSegmentLayout,
   levelScaleFactor,
   parseKey,
-  readSegment,
+  planChunkEncoding,
+  readChunk,
   sampleFormatToZarrType,
   sliceRange,
+  type ChunkEncoding,
   type SegmentLayout,
 } from "./tiff-utils.js";
 
@@ -29,6 +29,7 @@ type PlainContext = {
   resolutions: Array<{
     image: TiffImage;
     layout: SegmentLayout;
+    encoding: ChunkEncoding;
     shape: number[];
     chunkShape: number[];
     zarrJson: Uint8Array;
@@ -68,6 +69,10 @@ async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
 
   const resolutions = levelImages.map((levelImage) => {
     const layout = getSegmentLayout(levelImage);
+    const encoding = planChunkEncoding(levelImage, layout, {
+      isLittleEndian: tiff.isLittleEndian,
+      samplesPerPixel: planar ? 1 : samplesPerPixel,
+    });
     const shape = activeAxes.map((axis) => {
       if (axis === 'y') return layout.height;
       if (axis === 'x') return layout.width;
@@ -81,9 +86,10 @@ async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
     return {
       image: levelImage,
       layout,
+      encoding,
       shape,
       chunkShape,
-      zarrJson: arrayZarrJson({ shape, chunkShape, dataType }),
+      zarrJson: arrayZarrJson({ shape, chunkShape, dataType, codecs: encoding.codecs }),
     };
   });
 
@@ -165,25 +171,15 @@ export class TiffAsOmeZarrStore implements AsyncReadable {
 
     const segmentsPerPlane = layout.segmentsAcross * layout.segmentsDown;
     const segmentIndex = (planar ? c * segmentsPerPlane : 0) + yChunk * layout.segmentsAcross + xChunk;
-    // Number of samples interleaved within each segment.
-    const segmentSamples = planar ? 1 : samplesPerPixel;
-    const pixels = layout.segmentWidth * layout.segmentHeight;
-
-    const segment = await readSegment(image, segmentIndex, options);
-    if (!segment) {
-      return new Uint8Array(pixels * segmentSamples * bytesPerSample);
-    }
-    const data = await decodeSegment(segment, {
-      segmentWidth: layout.segmentWidth,
-      segmentHeight: layout.segmentHeight,
-      samplesPerPixel: segmentSamples,
+    return readChunk(image, segmentIndex, {
+      encoding: level.encoding,
+      layout,
+      // Number of samples interleaved within each segment.
+      samplesPerPixel: planar ? 1 : samplesPerPixel,
       bytesPerSample,
-      predictor: image.value(TiffTag.Predictor) ?? Predictor.None,
       isLittleEndian: this.#tiff.isLittleEndian,
+      signal: options.signal,
     });
-    return segmentSamples > 1
-      ? deinterleave(data, { pixels, samplesPerPixel: segmentSamples, bytesPerSample })
-      : data;
   }
 
   async getRange(key: AbsolutePath, range: RangeQuery, options: { signal?: AbortSignal } = {}): Promise<Uint8Array | undefined> {

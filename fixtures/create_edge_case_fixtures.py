@@ -79,6 +79,16 @@ def main():
     write_plain("strip_u8_lzw", d, photometric="minisblack", rowsperstrip=16, compression="lzw")
     add_ref("strip_u8_lzw", [d])
 
+    # Compressed with a short last strip: can't be passed through as-is.
+    d = rand((HEIGHT, WIDTH), "uint16")
+    write_plain("strip_u16_zlib", d, photometric="minisblack", rowsperstrip=16, compression="zlib")
+    add_ref("strip_u16_zlib", [d])
+
+    # Compressed strips that divide the height evenly: passed through.
+    d = rand((96, WIDTH), "uint16")
+    write_plain("strip_u16_zlib_even", d, photometric="minisblack", rowsperstrip=16, compression="zlib")
+    add_ref("strip_u16_zlib_even", [d])
+
     d = rand((HEIGHT, WIDTH), "int16")
     write_plain("strip_i16_be_zlib_pred2", d, byteorder=">", photometric="minisblack",
                 rowsperstrip=16, compression="zlib", predictor=True)
@@ -104,6 +114,12 @@ def main():
     d = rand((HEIGHT, WIDTH), "uint16")
     write_plain("tile_u16_zstd", d, photometric="minisblack", tile=(32, 32), compression="zstd")
     add_ref("tile_u16_zstd", [d])
+
+    # zstd + predictor: no Zarr equivalent for the predictor, so decoded in the store.
+    d = rand((HEIGHT, WIDTH), "uint16")
+    write_plain("tile_u16_zstd_pred2", d, photometric="minisblack", tile=(32, 32),
+                compression="zstd", predictor=True)
+    add_ref("tile_u16_zstd_pred2", [d])
 
     # ── RGB: chunky (contig) and planar (separate) ──
     rgb = rand((3, HEIGHT, WIDTH), "uint8")  # CYX

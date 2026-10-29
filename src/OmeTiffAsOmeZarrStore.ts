@@ -22,7 +22,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
-import { Predictor, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
+import { SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
 import { SourceFromAsyncReadable } from "./SourceFromAsyncReadable.js";
 import {
@@ -31,15 +31,16 @@ import {
   arrayZarrJson,
   consolidateMetadata,
   createSubIfdResolver,
-  decodeSegment,
   defaultWindow,
   encodeJson,
   getSegmentLayout,
   levelScaleFactor,
   parseKey,
-  readSegment,
+  planChunkEncoding,
+  readChunk,
   sampleFormatToZarrType,
   sliceRange,
+  type ChunkEncoding,
   type SegmentLayout,
 } from "./tiff-utils.js";
 import type { Ome } from './types.js';
@@ -183,6 +184,7 @@ function asArray<T>(value: T | T[] | undefined): T[] {
 
 type Level = {
   layout: SegmentLayout;
+  encoding: ChunkEncoding;
   shape: number[];
   chunkShape: number[];
   zarrJson: Uint8Array;
@@ -322,11 +324,16 @@ async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
     return resolveSubIfd(tiff.images[baseIfdIndex], resolution);
   };
 
-  // Level geometry comes from the IFDs of the first plane.
-  const layouts = await Promise.all(
-    Array.from({ length: meta.resolutions }, async (_, r) => getSegmentLayout(await indexer({ t: 0, c: 0, z: 0 }, r))),
+  // Level geometry and chunk encoding come from the IFDs of the first plane.
+  const levelImages = await Promise.all(
+    Array.from({ length: meta.resolutions }, (_, r) => indexer({ t: 0, c: 0, z: 0 }, r)),
   );
-  const resolutions: Level[] = layouts.map((layout) => {
+  const layouts = levelImages.map((image) => getSegmentLayout(image));
+  const resolutions: Level[] = layouts.map((layout, r) => {
+    const encoding = planChunkEncoding(levelImages[r], layout, {
+      isLittleEndian: tiff.isLittleEndian,
+      samplesPerPixel: 1,
+    });
     const shape = activeAxes.map((axis) => {
       switch (axis) {
         case 't': return meta.sizes.t;
@@ -343,9 +350,10 @@ async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
     });
     return {
       layout,
+      encoding,
       shape,
       chunkShape,
-      zarrJson: arrayZarrJson({ shape, chunkShape, dataType: meta.dataType }),
+      zarrJson: arrayZarrJson({ shape, chunkShape, dataType: meta.dataType, codecs: encoding.codecs }),
     };
   });
 
@@ -445,19 +453,13 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable {
       planeLayout.segmentWidth === layout.segmentWidth && planeLayout.segmentHeight === layout.segmentHeight,
       `IFD ${image.id} segment size differs from the first plane of level ${resolution}`,
     );
-    const { segmentWidth, segmentHeight } = layout;
-    const segment = await readSegment(image, y * layout.segmentsAcross + x, options);
-    if (!segment) {
-      // Sparse / empty tile — return zeros
-      return new Uint8Array(segmentWidth * segmentHeight * bytesPerSample);
-    }
-    return decodeSegment(segment, {
-      segmentWidth,
-      segmentHeight,
+    return readChunk(image, y * layout.segmentsAcross + x, {
+      encoding: level.encoding,
+      layout,
       samplesPerPixel: 1,
       bytesPerSample,
-      predictor: image.value(TiffTag.Predictor) ?? Predictor.None,
       isLittleEndian: this.#tiff.isLittleEndian,
+      signal: options.signal,
     });
   }
 

@@ -3,6 +3,7 @@ import { open, get as zarrGet } from 'zarrita';
 import { FileSystemStore } from '@zarrita/storage';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
+import { readFileSync } from 'fs';
 import { ImageSchema } from 'zod-ome-ngff/0.5';
 import { OmeTiffAsOmeZarrStore } from '../src/OmeTiffAsOmeZarrStore.js';
 import { TiffAsOmeZarrStore } from '../src/TiffAsOmeZarrStore.js';
@@ -178,4 +179,65 @@ describe('OmeTiffAsOmeZarrStore – stripped', () => {
     expect(arr.chunks).toEqual([1, 16, 90]);
     await expectMatchesReference(store, 'ome_stripped');
   });
+});
+
+describe('chunk encoding: passthrough vs decode in store', () => {
+  async function arrayCodecs(store: TiffAsOmeZarrStore | OmeTiffAsOmeZarrStore, level = 0) {
+    return JSON.parse(new TextDecoder().decode(await store.get(`/${level}/zarr.json`))).codecs;
+  }
+
+  /** Passthrough chunks are byte-for-byte slices of the TIFF file. */
+  function expectSliceOfFile(chunk: Uint8Array | undefined, file: string) {
+    expect(chunk).toBeDefined();
+    expect(readFileSync(join(EDGE_CASES, file)).indexOf(Buffer.from(chunk!))).toBeGreaterThan(0);
+  }
+
+  for (const [name, codecs] of [
+    ['tile_u16_zstd', [{ name: 'bytes', configuration: { endian: 'little' } }, { name: 'zstd', configuration: { level: 0, checksum: false } }]],
+    ['strip_u16_zlib_even', [{ name: 'bytes', configuration: { endian: 'little' } }, { name: 'zlib', configuration: { level: 1 } }]],
+    ['rgb_separate_strip_be', [{ name: 'bytes', configuration: { endian: 'big' } }]],
+  ] as const) {
+    it(`${name}: passes raw segment bytes through`, async () => {
+      const store = await openPlain(name);
+      expect(await arrayCodecs(store)).toEqual(codecs);
+      const firstChunk = name === 'rgb_separate_strip_be' ? '/0/c/1/0/0' : '/0/c/0/0';
+      expectSliceOfFile(await store.get(firstChunk), `${name}.tif`);
+      await expectMatchesReference(store, name);
+    });
+  }
+
+  it('uncompressed short last strip is padded in passthrough mode', async () => {
+    const store = await openPlain('strip_u16_none');
+    expect(await arrayCodecs(store)).toEqual([{ name: 'bytes', configuration: { endian: 'little' } }]);
+    expectSliceOfFile(await store.get('/0/c/0/0'), 'strip_u16_none.tif');
+    expect((await store.get('/0/c/6/0'))?.length).toBe(16 * 90 * 2);
+  });
+
+  it('OME-TIFF zlib tiles pass through at every level', async () => {
+    const file = join(__dirname, '..', 'fixtures', '9836842.v0_3.ome.tif');
+    const store = await OmeTiffAsOmeZarrStore.fromStore(new FileSystemStore(file));
+    for (let level = 0; level < 6; level++) {
+      expect(await arrayCodecs(store, level)).toEqual([
+        { name: 'bytes', configuration: { endian: 'little' } },
+        { name: 'zlib', configuration: { level: 1 } },
+      ]);
+    }
+    const chunk = await store.get('/5/c/2/0/0');
+    expect(readFileSync(file).indexOf(Buffer.from(chunk!))).toBeGreaterThan(0);
+  });
+
+  it('OME-TIFF with a predictor is decoded in the store', async () => {
+    const zstack = await openOme('ome_zstack');
+    // ome_zstack uses predictor 2, so it is decoded in the store.
+    expect(await arrayCodecs(zstack, 2)).toEqual([{ name: 'bytes', configuration: { endian: 'little' } }]);
+    expect((await zstack.get('/2/c/1/2/0/0'))?.length).toBe(32 * 48 * 2);
+  });
+
+  for (const name of ['strip_u16_zlib', 'strip_u8_lzw', 'tile_u16_zstd_pred2', 'tile_u2_be_pred2', 'tile_f4_le_pred3', 'rgb_contig_tiled_pred2', 'rgb_contig_strip']) {
+    it(`${name}: is decoded in the store`, async () => {
+      const store = await openPlain(name);
+      expect(await arrayCodecs(store)).toEqual([{ name: 'bytes', configuration: { endian: 'little' } }]);
+      await expectMatchesReference(store, name);
+    });
+  }
 });
