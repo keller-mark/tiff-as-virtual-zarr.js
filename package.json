@@ -28,6 +28,7 @@
     "@cogeotiff/core": "^9.4.0",
     "@developmentseed/lzw-tiff-decoder": "^0.2.2",
     "@zarrita/storage": "^0.2.0",
+    "fzstd": "^0.1.1",
     "zarrita": "^0.7.5",
     "zod": "^3.25.76",
     "zod-ome-ngff": "^0.3.0"

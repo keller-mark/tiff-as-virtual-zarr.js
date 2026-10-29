@@ -7,4 +7,5 @@ fixtures/*.zarr
 fixtures/*.tif
 !fixtures/mouse_liver.ome.tif
 fixtures/*.tiff
+fixtures/edge_cases/
 .DS_Store

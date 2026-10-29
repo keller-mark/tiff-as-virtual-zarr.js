@@ -25,6 +25,9 @@ importers:
       '@zarrita/storage':
         specifier: ^0.2.0
         version: 0.2.0
+      fzstd:
+        specifier: ^0.1.1
+        version: 0.1.1
       zarrita:
         specifier: ^0.7.5
         version: 0.7.5
@@ -447,6 +450,9 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  fzstd@0.1.1:
+    resolution: {integrity: sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA==}
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -901,6 +907,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  fzstd@0.1.1: {}
 
   magic-string@0.30.21:
     dependencies:

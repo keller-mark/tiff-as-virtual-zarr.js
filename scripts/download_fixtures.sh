@@ -61,4 +61,12 @@ convert_if_missing "ExpD_chicken_embryo_MIP.v0_5.ome.tif" "ExpD_chicken_embryo_M
 # ── Generate toy fixtures ──────────────────────────────────────────────────────
 create_toy_if_missing "test_image.ome.tif" "test_image.plain.tif" "test_image.ome.zarr" "create_toy_fixtures.py"
 
+# ── Generate edge-case fixtures ────────────────────────────────────────────────
+if [ ! -e "edge_cases/reference.zarr" ]; then
+  echo "Creating edge-case fixtures ..."
+  uv run create_edge_case_fixtures.py
+else
+  echo "Already exists: edge_cases/"
+fi
+
 echo "All fixtures ready."
