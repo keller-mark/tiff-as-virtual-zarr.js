@@ -46,7 +46,8 @@ jobs:
             fixtures/test_image.ome.tif
             fixtures/test_image.plain.tif
             fixtures/test_image.ome.zarr
-          key: fixtures-${{ hashFiles('fixtures/convert_pre_v0_5.py', 'fixtures/convert_v0_5.py', 'fixtures/create_toy_fixtures.py') }}
+            fixtures/edge_cases
+          key: fixtures-${{ hashFiles('fixtures/convert_pre_v0_5.py', 'fixtures/convert_v0_5.py', 'fixtures/create_toy_fixtures.py', 'fixtures/create_edge_case_fixtures.py') }}
 
       - name: Generate test fixtures
         if: steps.cache-fixtures.outputs.cache-hit != 'true'

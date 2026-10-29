@@ -60,7 +60,7 @@ Any other key, or a recognised key whose level or chunk coordinates fall outside
 - Opening a store MUST read only the TIFF header and the IFDs needed to answer metadata. It MUST NOT read pixel data.
 - A store MUST NOT read the whole source in one request, and SHOULD NOT read it in full at all, unless the caller asks for every chunk.
 - Building the virtual metadata SHOULD happen once, lazily on the first `get`, and be cached for the lifetime of the store.
-- SubIFDs SHOULD be parsed lazily, on the first request for a chunk that needs them, and cached by file offset.
+- The SubIFDs of the first plane are needed to answer level shapes and chunk shapes, so they MAY be read when opening. The SubIFDs of every other plane SHOULD be parsed lazily, on the first request for a chunk that needs them, and cached by file offset.
 - Serving a chunk MUST read only the byte range(s) of the segment(s) backing that chunk (plus any IFD/offset-table bytes not yet cached). When an IFD's offset/byte-count arrays are large, implementations SHOULD fetch only the entries they need.
 
 ### 2.4 Root group metadata (`/zarr.json`)
@@ -114,36 +114,55 @@ Clients compare metadata as parsed JSON, not as bytes. Whitespace and key order 
 
 Chunk *(level r, coordinates i)* maps to exactly **one TIFF segment** in **one IFD**. The store-specific sections define how to find that IFD and segment.
 
-Two strategies are allowed for serving the payload. The `codecs` array in §2.5 MUST match the strategy the store uses.
+Two strategies are allowed for serving the payload. The store picks one per array (level), using that level's first-plane IFD. The `codecs` array in §2.5 MUST match the strategy chosen. A store MUST NOT mix strategies within one array.
 
-**Strategy A — decode in the store (the reference implementation does this).**
-The store reads the segment bytes and then:
+**Strategy A (pass-through) is preferred.** It serves the bytes exactly as stored in the TIFF, so the store does no decompression. Decoding then happens in the Zarr client, using the same codec pipeline it uses for real OME-Zarr data. Strategy B (decode in the store) is the fallback for arrays whose encoding has no Zarr v3 equivalent. The reference implementation follows this rule: Strategy A wherever it is allowed, Strategy B everywhere else.
 
-1. **Decompresses** them according to TIFF `Compression` (tag 259). Implementations MUST support `1` (none), `5` (LZW), `8` and `32946` (Deflate/zlib). They MAY support others (e.g. `50000` zstd, `34887` LERC), and MUST fail with a clear error on any they don't support.
-2. **Reverses the predictor** (tag 317). If `Predictor = 2` (horizontal differencing), each row is undifferenced in place: for every byte `k ≥ bpp` in a row, `row[k] = (row[k] + row[k − bpp]) mod 256`. Here `bpp` is the byte stride of one pixel *unit* (§2.6.1), and the row length is `segmentWidth × bpp`. *(Byte-wise undifferencing is only exact for 8-bit samples. Implementations supporting predictor 2 on wider samples SHOULD undifference per sample in the sample's native width and byte order, before step 3.)* `Predictor = 3` (floating point) MAY be supported. If it isn't, the store MUST fail with an error.
-3. **Normalises byte order to little-endian.** If the TIFF header is big-endian (`MM`) and the sample size is > 1 byte, reverse the bytes of each sample.
-4. **Pads to the full chunk size.** The returned buffer MUST be exactly `prod(chunk_shape) × bytes_per_element` bytes. TIFF tiles are already padded to full tile size. Strips are not padded: the last strip of an image has `ImageLength mod RowsPerStrip` rows. Pad it with `fill_value` (zero bytes) up to the full chunk.
+#### Strategy A — pass compressed bytes through (preferred)
 
-The codec chain is then just `[{"name": "bytes", "configuration": {"endian": "little"}}]`.
-
-**Strategy B — pass compressed bytes through (OPTIONAL optimisation).**
-If the TIFF compression has an equivalent Zarr v3 codec, and no predictor or byte swap is needed (or it can be expressed as a codec), the store MAY return the raw segment bytes unchanged and declare the matching codec chain:
+The store returns the raw segment bytes unchanged and declares the codec chain that decodes them:
 
 | TIFF `Compression` | Zarr v3 `codecs` |
 | --- | --- |
-| 1 | `[bytes]` |
-| 8, 32946 | `[bytes, {"name": "zlib", …}]`* |
-| 50000 | `[bytes, {"name": "zstd", …}]` |
+| 1 | `[{"name": "bytes", "configuration": {"endian": E}}]` |
+| 8, 32946 | `[{"name": "bytes", …}, {"name": "zlib", "configuration": {"level": 1}}]`* |
+| 50000 | `[{"name": "bytes", …}, {"name": "zstd", "configuration": {"level": 0, "checksum": false}}]` |
 
-\* `zlib` is not a core Zarr v3 codec, and many readers only ship `gzip`. Only use Strategy B with codecs the target clients support. The `bytes` codec's `endian` MUST match the TIFF header byte order.
+`E` is `"little"` for `II` files and `"big"` for `MM` files. Codec `level` values only affect encoding, so their exact values don't matter for reading.
 
-Strategy B is not allowed when segment shapes differ from the declared chunk shape, e.g. unpadded final strips. A store MUST NOT mix strategies within one array.
+\* `zlib` is not a core Zarr v3 codec. zarrita registers it (and `zstd`) by default, but other readers may ship only `gzip` or name it `numcodecs.zlib`. Only use Strategy A with codecs the target clients support.
 
-**Sparse / missing segments.** If a segment's byte count is 0 (or its offset is 0), the chunk MUST be served as an all-`fill_value` buffer of full chunk size (Strategy A). Alternatively it MAY be reported *absent*, which Zarr readers interpret as `fill_value`.
+A store SHOULD use Strategy A for every array that meets all of the following conditions, and MUST NOT use it for any array that doesn't:
 
-#### 2.6.1 Pixel unit
+- Its compression appears in the table above. LZW, JPEG, LERC and others have no Zarr v3 equivalent.
+- `Predictor = 1`. Zarr v3 has no codec for TIFF's per-row predictors.
+- Its segments are not sample-interleaved (`spp = 1`). A `transpose` codec with `order: [1, 2, 0]` can describe `(y, x, s)` segments as a `(c, y, x)` array. But readers such as zarrita then return arrays in that non-C memory order, which a real OME-Zarr image would not produce, so interleaved arrays MUST use Strategy B.
+- Every segment decodes to exactly the chunk size. Compressed final strips shorter than `RowsPerStrip` rule this out, because they can't be padded without re-encoding. Uncompressed short strips MAY still be passed through, zero-padded to the full chunk size.
 
-`bpp` (bytes per pixel unit) = `BitsPerSample / 8` for single-sample or planar-separate images. For chunky-interleaved images (`PlanarConfiguration = 1` and `SamplesPerPixel > 1`) it is `(BitsPerSample / 8) × SamplesPerPixel`. Sub-byte sample sizes (1-bit, 4-bit) are out of scope.
+Every plane of the array MUST share the compression and predictor that the strategy was chosen from. A chunk request that finds otherwise MUST fail with an error.
+
+#### Strategy B — decode in the store (fallback)
+
+Use this for any array that doesn't qualify for Strategy A. The store reads the segment bytes and then:
+
+1. **Decompresses** them according to TIFF `Compression` (tag 259). Implementations MUST support `1` (none), `5` (LZW), `8` and `32946` (Deflate/zlib). They MAY support others (e.g. `50000` zstd, `34887` LERC), and MUST fail with a clear error on any they don't support.
+2. **Reverses the predictor** (tag 317). Let `spp` be the number of samples interleaved per pixel in the segment (§2.6.1), `bps = BitsPerSample / 8`, and `rowSamples = segmentWidth × spp`. Each row is processed independently:
+   - `Predictor = 2` (horizontal differencing): treat the row as `rowSamples` unsigned integers of `bps` bytes in the **file's** byte order. For `i` from `spp` to `rowSamples − 1`, set `v[i] = (v[i] + v[i − spp]) mod 2^(8·bps)`. This happens before step 3.
+   - `Predictor = 3` (floating point): first undifference the row's `rowSamples × bps` bytes byte-wise: `b[i] = (b[i] + b[i − spp]) mod 256`. The row then holds `bps` byte planes of `rowSamples` bytes each, most significant byte first. Sample `j` is reassembled as little-endian bytes `out[j·bps + k] = b[(bps − 1 − k) · rowSamples + j]` for `k = 0 … bps−1`. The result is already little-endian, so step 3 is skipped.
+   - Any other predictor value MUST cause an error.
+3. **Normalises byte order to little-endian.** If the TIFF header is big-endian (`MM`) and the sample size is > 1 byte, reverse the bytes of each sample.
+4. **Pads to the full chunk size.** The returned buffer MUST be exactly `prod(chunk_shape) × bytes_per_element` bytes. TIFF tiles are already padded to full tile size. Strips are not padded: the last strip of an image has `ImageLength mod RowsPerStrip` rows. Pad it with `fill_value` (zero bytes) up to the full chunk.
+5. **Reorders samples** if the store exposes interleaved samples as a leading channel axis (§4.2): convert the `(y, x, s)` buffer to `(s, y, x)` order.
+
+The codec chain is then just `[{"name": "bytes", "configuration": {"endian": "little"}}]`.
+
+#### Sparse / missing segments
+
+If a segment's byte count is 0 (or its offset is 0), a Strategy A chunk MUST be reported *absent*, which Zarr readers interpret as `fill_value`, because there are no encoded bytes to return. A Strategy B chunk MUST be served as an all-`fill_value` buffer of full chunk size.
+
+#### 2.6.1 Interleaved samples
+
+The number of samples interleaved per pixel within a segment, `spp`, is `1` for single-sample or planar-separate images. For chunky-interleaved images (`PlanarConfiguration = 1` and `SamplesPerPixel > 1`) it is `SamplesPerPixel`. A decoded segment holds `segmentWidth × segmentHeight × spp` samples. Sub-byte sample sizes (1-bit, 4-bit) are out of scope.
 
 ### 2.7 Data type mapping
 
@@ -159,8 +178,12 @@ Strategy B is not allowed when segment shapes differ from the declared chunk sha
 
 For level `r`:
 
-- `shape_y(r)`, `shape_x(r)` MUST be the `ImageLength` (257) and `ImageWidth` (256) of the IFD backing that level. A store MAY derive them as `floor(size_y(0) / 2^r)` and `floor(size_x(0) / 2^r)` *only* if this is guaranteed to equal the IFD values.
-- The spatial `scale` for Y/X at level `r` SHOULD be `scale(0) × size(0) / size(r)` per axis. That is exactly `scale(0) × 2^r` for power-of-two pyramids. Non-spatial axes MUST have scale `1.0`.
+- `shape_y(r)`, `shape_x(r)` MUST be the `ImageLength` (257) and `ImageWidth` (256) of the IFD backing that level. Writers differ in rounding (e.g. 247 → 123 or 124), so these MUST NOT be derived from the level-0 size.
+- The spatial `scale` for Y/X at level `r` is `scale(0) × f(r)` per axis, where the downsampling factor is:
+  - `f(r) = 2^r` if `size(r)` equals `floor(size(0) / 2^r)` or `ceil(size(0) / 2^r)` (a power-of-two pyramid with either rounding);
+  - otherwise `f(r) = size(0) / size(r)`.
+
+  This keeps scales exact (e.g. `[1.6, 3.2, 6.4, …]`) for the usual power-of-two pyramids, where a plain size ratio would drift at small levels. Non-spatial axes MUST have scale `1.0`, except `z` in §3.6.
 
 ### 2.9 Consolidated metadata (OPTIONAL)
 
@@ -213,7 +236,7 @@ The array axes are the **active axes**: a subset of `t, c, z, y, x` in that fixe
 | `y` | `{"name": "y", "type": "space"}` (+ `"unit"` from `PhysicalSizeYUnit` if present) |
 | `x` | `{"name": "x", "type": "space"}` (+ `"unit"` from `PhysicalSizeXUnit` if present) |
 
-Units SHOULD be converted from OME-XML symbols to OME-NGFF unit names (`µm` → `micrometer`, `nm` → `nanometer`, `mm` → `millimeter`, `Å` → `angstrom`, `s` → `second`, …).
+Units SHOULD be converted from OME-XML symbols to OME-NGFF unit names (`µm` → `micrometer`, `nm` → `nanometer`, `mm` → `millimeter`, `Å` → `angstrom`, `s` → `second`, …). A `unit` is emitted only when the matching `PhysicalSize*` is a positive number. If the size has no unit attribute, the OME-XML schema default `µm` applies.
 
 
 ### 3.3 Levels (pyramid discovery)
@@ -246,10 +269,9 @@ If the OME-XML has explicit `TiffData` elements with `IFD`/`FirstZ`/`FirstC`/`Fi
 For level `r`:
 
 - `shape`: for each active axis, `SizeT`, `SizeC` or `SizeZ` for `t`/`c`/`z`, and `shape_y(r)`/`shape_x(r)` (§2.8) for `y`/`x`.
-- `chunk_shape`: `1` for `t`, `c`, `z`. For `y`/`x` it is the TIFF `TileLength` (323) / `TileWidth` (322) of IFD 0. Level ≥ 1 IFDs MUST use the same tile size; if they don't, the store MUST fail when opened.
+- `chunk_shape`: `1` for `t`, `c`, `z`. For `y`/`x` it is the segment size of the first plane's IFD at level `r`: `TileLength` (323) / `TileWidth` (322) when tiled, or `RowsPerStrip` (clamped to the level height) / `ImageWidth` when stripped. Tiles need not be square or powers of two. Each level MAY use a different segment size. All planes within one level MUST share it; a chunk request that finds a different segment size MUST fail with an error.
 - `data_type`: from `Pixels@Type` (§2.7). It MUST agree with `BitsPerSample`/`SampleFormat` of IFD 0.
 
-OME-TIFFs in stripped layout MAY be supported with the chunking rules of §4.4 (stripped case). Otherwise the store MUST reject them when opened.
 
 ### 3.6 Root metadata
 
@@ -280,7 +302,7 @@ OME-TIFFs in stripped layout MAY be supported with the chunking rules of §4.4 (
 
 - `color`: if `Channel@Color` is present, it is a signed 32-bit integer in **RGBA** byte order. Write it as big-endian int32 and take the first three bytes as `RRGGBB` (lower-case hex, zero-padded, no `#`). Otherwise use the default palette `[00FFFF, FFFF00, FF00FF, FF0000, 00FF00, 0000FF]` cycled by channel index.
 - `active`: `true` for the first 6 channels, `false` for the rest.
-- `window`: implementations SHOULD use the dtype's range (e.g. `0…255` for `uint8`). The reference implementation uses a fixed `0…65535`.
+- `window`: for integer types, `min = start` and `max = end` are the dtype's range (e.g. `0…255` for `uint8`, `−32768…32767` for `int16`). Float types have no natural range, so they use `0…1`.
 
 ### 3.7 Chunk resolution
 
@@ -289,8 +311,8 @@ For key `/{r}/c/{i…}`:
 1. Reject with *absent* if `r ≥ L`, the number of coordinates ≠ number of active axes, or any coordinate ≥ `ceil(shape / chunk_shape)` on its axis.
 2. Read `t`, `c`, `z` from the coordinates of the matching active axes (0 when the axis is inactive). Read `ty`, `tx` from the `y`, `x` coordinates.
 3. Compute `p` (§3.4), then find the IFD for `(p, r)` (§3.3).
-4. Tile index within the IFD: `k = ty × ceil(ImageWidth / TileWidth) + tx`.
-5. Read `TileOffsets[k]`, `TileByteCounts[k]`, then fetch that range and produce the payload (§2.6).
+4. Segment index within the IFD: `k = ty × ceil(ImageWidth / TileWidth) + tx` when tiled, or `k = ty` when stripped (`tx` is always 0).
+5. Read entry `k` of `TileOffsets`/`TileByteCounts` (or `StripOffsets`/`StripByteCounts`), fetch that range, and produce the payload (§2.6) with `spp = 1`.
 
 ---
 
@@ -323,10 +345,10 @@ Let `S = SamplesPerPixel`.
 | Condition | Active axes | Notes |
 | --- | --- | --- |
 | `S = 1` | `y, x` | Grayscale |
-| `S > 1` and `PlanarConfiguration = 1` | `y, x, s` | Chunky / interleaved (e.g. RGB). Samples are the fastest-varying axis, so each segment already *is* a C-order `(y, x, s)` chunk. |
+| `S > 1` and `PlanarConfiguration = 1` | `c, y, x` | Chunky / interleaved (e.g. RGB). One segment holds every sample, so one chunk spans the whole `c` axis. The store de-interleaves each segment from `(y, x, s)` to `(c, y, x)` order (§2.6, Strategy B, step 5). |
 | `S > 1` and `PlanarConfiguration = 2` | `c, y, x` | Planar. Sample planes are stored separately. |
 
-Axis entries: `y`, `x` → `{"type": "space"}`, `c` → `{"type": "channel"}`. The `s` axis needs a type that OME-NGFF v0.5 accepts but that spatial consumers won't treat as a spatial dimension. Implementations SHOULD use `{"name": "c", "type": "channel"}` if strict OME-NGFF validity is required. The reference implementation emits `{"name": "s", "type": "space"}`; this is valid for Zarr but places a channel-like axis last, which v0.5 does not permit for `channel`-typed axes. See Appendix A.
+Axis entries: `y`, `x` → `{"type": "space"}`, `c` → `{"type": "channel"}`. Samples always form a leading `channel` axis, because OME-NGFF v0.5 requires channel axes to come before space axes.
 
 No units are emitted. All base scales are `1.0`.
 
@@ -337,14 +359,13 @@ No units are emitted. All base scales are `1.0`.
 
 ### 4.4 Array metadata
 
-For level `r`, with `H(r)`, `W(r)` from §2.8:
+For level `r`, with `H(r)`, `W(r)` from §2.8 and tags read from the level's IFD:
 
 | Axis | `shape` | `chunk_shape` (tiled) | `chunk_shape` (stripped) |
 | --- | --- | --- | --- |
-| `y` | `H(r)` | `TileLength` | `RowsPerStrip` (clamped to `H(0)`) |
-| `x` | `W(r)` | `TileWidth` | `W(0)` (full width) |
-| `s` | `S` | `S` | `S` |
-| `c` | `S` | `1` | `1` |
+| `c` | `S` | `S` if chunky, `1` if planar | `S` if chunky, `1` if planar |
+| `y` | `H(r)` | `TileLength` | `RowsPerStrip` (clamped to `H(r)`) |
+| `x` | `W(r)` | `TileWidth` | `W(r)` (full width) |
 
 `data_type`: `{uint|int|float}{BitsPerSample}` from `SampleFormat` (§2.7).
 
@@ -355,7 +376,7 @@ For stripped images, the strip height MUST be taken from `RowsPerStrip`, not com
 For key `/{r}/c/{i…}`:
 
 1. Reject with *absent* on out-of-range level or coordinates (as in §3.7, step 1).
-2. Read `c` (0 if the axis is inactive), `cy`, `cx` from the coordinates. The `s` coordinate, if present, is always `0`.
+2. Read `c` (0 if the axis is inactive), `cy`, `cx` from the coordinates. For chunky images `c` is always `0`.
 3. Find the IFD:
    - Planar-separate TIFFs SHOULD store all sample planes in the **same** IFD, as consecutive runs of segments (TIFF 6.0). The segment index is `k = c × segmentsPerPlane + k₀`.
    - Some writers instead put each sample plane in its own main-chain IFD. Implementations MAY detect this (e.g. `SamplesPerPixel = 1` on each page with `N` pages) and use IFD `c` with `k = k₀`.
@@ -363,7 +384,7 @@ For key `/{r}/c/{i…}`:
 4. Find the segment index `k₀`:
    - Tiled: `k₀ = cy × ceil(W(r) / TileWidth) + cx`.
    - Stripped: `k₀ = cy` (and `cx` MUST be `0`).
-5. Fetch the segment and produce the payload (§2.6), using `bpp` from §2.6.1. Pad final strips to the full chunk height.
+5. Fetch the segment and produce the payload (§2.6), using `spp` from §2.6.1. Pad final strips to the full chunk height. For chunky images, de-interleave to `(c, y, x)`.
 
 ---
 
@@ -380,21 +401,13 @@ An implementation is conformant if, for a TIFF/OME-TIFF and an OME-Zarr v0.5 ima
 
 ---
 
-## Appendix A. Known deviations of the reference TypeScript implementation
+## Appendix A. Known gaps in the reference TypeScript implementation
 
-The reference implementation (`src/`, as of this writing) is narrower than this specification, or departs from it, in these ways. Ports should follow the spec; this list tracks the known gaps.
+The reference implementation (`src/`) follows every MUST in this specification. It does not implement these optional (SHOULD/MAY) features:
 
 | Area | Spec | Reference implementation |
 | --- | --- | --- |
-| OME level count with SubIFDs (§3.3) | `L = n + 1` | `L = subIfds.length − 1` (inherited from Vizarr), which exposes fewer levels than the file contains |
-| OME chunk shape (§3.5) | `TileLength × TileWidth` | Largest power of two ≤ `min(TileWidth, TileLength)` (a deck.gl constraint). Equal to the spec for square power-of-two tiles. |
-| Level shape (§2.8) | IFD `ImageLength`/`ImageWidth` | `size >> r` (floor-halving) |
-| Level scale (§2.8) | `scale(0) × size(0)/size(r)` | `scale(0) × 2^r` |
-| Z scale / units (§3.2, §3.6) | `PhysicalSizeZ`, unit conversion | `z` scale fixed at `1.0`. Units passed through verbatim (e.g. `µm`). |
-| `omero.window` (§3.6) | dtype range | Fixed `0…65535` |
-| Predictor (§2.6 A.2) | Per-sample undifferencing | Byte-wise undifferencing (exact for 8-bit only). Predictor 3 not handled. |
-| Final-strip padding (§2.6 A.4) | Pad to full chunk | Not padded for uncompressed/compressed strips |
-| Strip height (§4.4) | `RowsPerStrip` | `ceil(ImageLength / stripCount)` |
-| Planar-separate segments (§4.5) | Same-IFD segment runs (MAY support IFD-per-plane) | IFD-per-plane only |
-| Plain-TIFF `s` axis (§4.2) | Prefer `c`/`channel` | `{"name": "s", "type": "space"}` |
-| Compression (§2.6) | none, LZW, Deflate; others optional | none, LZW, Deflate. zstd not supported. Strategy B not used. |
+| `TiffData` mapping (§3.4) | SHOULD take precedence over the `DimensionOrder` formula | Always uses the formula |
+| Planar IFD-per-plane (§4.5) | MAY detect sample planes stored in separate IFDs | Only same-IFD segment runs (the TIFF 6.0 layout) |
+| Strip offset reads (§2.3) | SHOULD fetch only the needed offset/byte-count entries | Loads the full `StripOffsets`/`StripByteCounts` arrays on first use (tile offsets are read per entry) |
+| Compression (§2.6) | MAY support codecs beyond none/LZW/Deflate | Also supports zstd (50000). No LERC, JPEG, or WebP. |
