@@ -12,7 +12,7 @@ const FIXTURES = join(__dirname, '..', 'fixtures');
 
 // ── OmeTiffAsOmeZarrStore – toy OME-TIFF ──────────────────────────────────────
 // test_image.ome.tif: CYX uint8, 3 channels, 128×128, pyramidal with 3 SubIFDs
-// OmeTiffAsOmeZarrStore exposes subIfds.length - 1 = 2 visible levels (0 and 1).
+// OmeTiffAsOmeZarrStore exposes subIfds.length + 1 = 4 levels.
 describe('OmeTiffAsOmeZarrStore – toy OME-TIFF (CYX uint8, 3×128×128)', () => {
   let tiffStore: OmeTiffAsOmeZarrStore;
   let refStore: FileSystemStore;
@@ -41,10 +41,10 @@ describe('OmeTiffAsOmeZarrStore – toy OME-TIFF (CYX uint8, 3×128×128)', () =
     expect(channels.map((c: any) => c.label)).toEqual(['DAPI', 'GFP', 'Brightfield']);
   });
 
-  it('exposes 2 resolution levels (subIfds.length - 1)', async () => {
+  it('exposes 4 resolution levels (subIfds.length + 1)', async () => {
     const group = await open(tiffStore, { kind: 'group' });
     const attrs = group.attrs as any;
-    expect(attrs.ome.multiscales[0].datasets.length).toBe(2);
+    expect(attrs.ome.multiscales[0].datasets.length).toBe(4);
   });
 
   it('scale-0 shape matches reference zarr', async () => {
@@ -118,14 +118,14 @@ describe('getConsolidatedMetadata – toy OME-TIFF', () => {
     expect(cm.must_understand).toBe(false);
   });
 
-  it('shape and dtype for each visible level match reference zarr', () => {
+  it('shape and dtype for each level match reference zarr', () => {
     const rootJson = JSON.parse(readFileSync(join(FIXTURES, 'test_image.ome.zarr', 'zarr.json'), 'utf8'));
     const refMeta = rootJson.consolidated_metadata?.metadata ?? {};
     const cm = (virtual as any).consolidated_metadata;
     const virtualLevels = Object.keys(cm.metadata)
       .sort((a, b) => parseInt(a) - parseInt(b))
       .map((k) => ({ shape: cm.metadata[k].shape, dtype: cm.metadata[k].data_type }));
-    expect(virtualLevels.length).toBe(2);
+    expect(virtualLevels.length).toBe(4);
     for (let i = 0; i < virtualLevels.length; i++) {
       expect(virtualLevels[i].shape).toEqual(refMeta[i.toString()].shape);
       expect(virtualLevels[i].dtype).toBe(refMeta[i.toString()].data_type);
@@ -135,7 +135,7 @@ describe('getConsolidatedMetadata – toy OME-TIFF', () => {
 
 // ── TiffAsOmeZarrStore – toy plain TIFF ───────────────────────────────────────
 // test_image.plain.tif: RGB uint8, YXC interleaved (SamplesPerPixel=3, Contig)
-// → TiffAsOmeZarrStore maps to axes ['y', 'x', 's'], shape [128, 128, 3]
+// → TiffAsOmeZarrStore maps to axes ['c', 'y', 'x'], shape [3, 128, 128]
 describe('TiffAsOmeZarrStore – toy plain TIFF (RGB uint8, 128×128×3)', () => {
   let plainStore: TiffAsOmeZarrStore;
 
@@ -145,17 +145,19 @@ describe('TiffAsOmeZarrStore – toy plain TIFF (RGB uint8, 128×128×3)', () =>
     );
   });
 
-  it('axes are y, x, s (chunky interleaved RGB)', async () => {
+  it('axes are c, y, x (chunky interleaved RGB exposed as channels)', async () => {
     const group = await open(plainStore, { kind: 'group' });
     const attrs = group.attrs as any;
     const axes = attrs.ome.multiscales[0].axes;
-    expect(axes.map((a: any) => a.name)).toEqual(['y', 'x', 's']);
+    expect(axes.map((a: any) => a.name)).toEqual(['c', 'y', 'x']);
+    expect(axes[0].type).toBe('channel');
   });
 
-  it('scale-0 has shape [128, 128, 3]', async () => {
+  it('scale-0 has shape [3, 128, 128] with one chunk spanning all samples', async () => {
     const group = await open(plainStore, { kind: 'group' });
     const arr = await open(group.resolve('0'), { kind: 'array' });
-    expect(arr.shape).toEqual([128, 128, 3]);
+    expect(arr.shape).toEqual([3, 128, 128]);
+    expect(arr.chunks).toEqual([3, 64, 64]);
   });
 
   it('scale-0 has correct dtype', async () => {
@@ -170,34 +172,17 @@ describe('TiffAsOmeZarrStore – toy plain TIFF (RGB uint8, 128×128×3)', () =>
     expect(attrs.ome.multiscales[0].datasets.length).toBe(1);
   });
 
-  it('pixel values at (y=0,x=0) match reference zarr channel data', async () => {
-    // The plain TIFF stores (R, G, B) interleaved per pixel.
-    // sample 0 at pixel (0,0) == zarr channel 0 at (0,0), etc.
+  it('pixel values match reference zarr channel data', async () => {
+    // The plain TIFF stores (R, G, B) interleaved per pixel; the store
+    // de-interleaves them so sample s == reference zarr channel s.
     const refStore = new FileSystemStore(join(FIXTURES, 'test_image.ome.zarr'));
     const plainGroup = await open(plainStore, { kind: 'group' });
     const refGroup = await open(refStore, { kind: 'group' });
     const plainArr = await open(plainGroup.resolve('0'), { kind: 'array' });
     const refArr = await open(refGroup.resolve('0'), { kind: 'array' });
 
-    // Read first tile from plain TIFF (YXS order, tile 64×64×3)
-    const plainTile = await zarrGet(plainArr, [slice(0, 64), slice(0, 64), slice(null)]);
-    // Read all three channels from reference zarr (CYX order)
-    const refCh0 = await zarrGet(refArr, [0, slice(0, 64), slice(0, 64)]);
-    const refCh1 = await zarrGet(refArr, [1, slice(0, 64), slice(0, 64)]);
-    const refCh2 = await zarrGet(refArr, [2, slice(0, 64), slice(0, 64)]);
-
-    // plainTile.data is YXS-order: index = (y * 64 + x) * 3 + s
-    // refChN.data is YX-order:    index = y * 64 + x
-    const numPixels = 64 * 64;
-    const plainData = plainTile.data as Uint8Array;
-    const ch0Data = refCh0.data as Uint8Array;
-    const ch1Data = refCh1.data as Uint8Array;
-    const ch2Data = refCh2.data as Uint8Array;
-
-    for (let p = 0; p < numPixels; p++) {
-      expect(plainData[p * 3 + 0]).toBe(ch0Data[p]);
-      expect(plainData[p * 3 + 1]).toBe(ch1Data[p]);
-      expect(plainData[p * 3 + 2]).toBe(ch2Data[p]);
-    }
+    const plainData = await zarrGet(plainArr, [null, slice(0, 100), slice(0, 100)]);
+    const refData = await zarrGet(refArr, [null, slice(0, 100), slice(0, 100)]);
+    expect(plainData.data).toEqual(refData.data);
   });
 });

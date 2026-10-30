@@ -1,132 +1,157 @@
-import { Compression, PlanarConfiguration, Predictor, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
+import { PlanarConfiguration, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
 import { SourceFromAsyncReadable } from "./SourceFromAsyncReadable.js";
-import { encodeJson, parseKey, decompressTile, loadSubIfd } from "./tiff-utils.js";
+import { CYMRGB } from "./OmeTiffAsOmeZarrStore.js";
+import {
+  assert,
+  arrayZarrJson,
+  consolidateMetadata,
+  createSubIfdResolver,
+  defaultWindow,
+  encodeJson,
+  getSegmentLayout,
+  levelScaleFactor,
+  omeroModel,
+  parseKey,
+  planChunkEncoding,
+  readChunk,
+  sampleFormatToZarrType,
+  sliceRange,
+  type ChunkEncoding,
+  type SegmentLayout,
+} from "./tiff-utils.js";
+import type { Ome } from './types.js';
 
-type PlainAxisName = 'c' | 'y' | 'x' | 's';
-
-/** Whether the TIFF is tiled or stripped. */
-type TiffLayout =
-  | { kind: 'tiled'; tileWidth: number; tileHeight: number }
-  | { kind: 'stripped'; stripHeight: number; imageWidth: number };
+type PlainAxisName = 'c' | 'y' | 'x';
 
 type PlainContext = {
-  layout: TiffLayout;
   bytesPerSample: number;
   samplesPerPixel: number;
-  predictor: Predictor;
+  planar: boolean;
   activeAxes: PlainAxisName[];
-  indexer(coords: { c: number }, resolution: number): Promise<TiffImage>;
   root: { zarrJson: Uint8Array };
   resolutions: Array<{
-    sizes: { c: number; y: number; x: number };
+    image: TiffImage;
+    layout: SegmentLayout;
+    encoding: ChunkEncoding;
+    shape: number[];
+    chunkShape: number[];
     zarrJson: Uint8Array;
   }>;
 };
 
-function sampleFormatToZarrType(bitsPerSample: number, fmt: SampleFormat): string {
-  switch (fmt) {
-    case SampleFormat.Uint:  return `uint${bitsPerSample}`;
-    case SampleFormat.Int:   return `int${bitsPerSample}`;
-    case SampleFormat.Float: return `float${bitsPerSample}`;
-    default:                 return `uint${bitsPerSample}`;
-  }
+const RGB_CHANNELS = [['R', 'FF0000'], ['G', '00FF00'], ['B', '0000FF']];
+
+function plainOmero(dataType: string, samplesPerPixel: number, model: 'color' | 'greyscale'): Ome.Omero {
+  const window = defaultWindow(dataType);
+  return {
+    id: 1,
+    version: '0.1',
+    channels: Array.from({ length: samplesPerPixel }, (_, i) => {
+      // In the color model the first three samples are R, G, B; any extra
+      // samples (e.g. alpha) are inactive.
+      const rgb = model === 'color' ? RGB_CHANNELS[i] : undefined;
+      return {
+        active: i < (model === 'color' ? 3 : 6),
+        label: rgb?.[0],
+        color: rgb?.[1] ?? (samplesPerPixel === 1 ? 'FFFFFF' : CYMRGB[i % CYMRGB.length].slice(1)),
+        coefficient: 1,
+        family: 'linear',
+        inverted: false,
+        window: { ...window },
+      } satisfies Ome.Channel;
+    }),
+    rdefs: {
+      model,
+    },
+  };
 }
 
 async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
   const image = tiff.images[0];
 
-  const { width, height } = image.size;
   const bitsPerSampleArr = image.value(TiffTag.BitsPerSample);
   const bitsPerSample = bitsPerSampleArr ? bitsPerSampleArr[0] : 8;
+  assert(
+    [8, 16, 32, 64].includes(bitsPerSample),
+    `Unsupported BitsPerSample: ${bitsPerSample}`,
+  );
   const sampleFormatArr = image.value(TiffTag.SampleFormat);
   const sampleFmt = sampleFormatArr ? sampleFormatArr[0] : SampleFormat.Uint;
   const samplesPerPixel = image.value(TiffTag.SamplesPerPixel) ?? 1;
   const planarConfig = image.value(TiffTag.PlanarConfiguration) ?? PlanarConfiguration.Contig;
-  const predictor = image.value(TiffTag.Predictor) ?? Predictor.None;
   const bytesPerSample = bitsPerSample / 8;
-  const zarrType = sampleFormatToZarrType(bitsPerSample, sampleFmt);
+  const dataType = sampleFormatToZarrType(bitsPerSample, sampleFmt);
+  // Planar-separate data stores each sample plane as its own run of segments
+  // in the same IFD; chunky data interleaves all samples within each segment.
+  const planar = samplesPerPixel > 1 && planarConfig === PlanarConfiguration.Separate;
 
-  // Layout: tiled vs stripped
-  let layout: TiffLayout;
-  if (image.isTiled()) {
-    const { width: tw, height: th } = image.tileSize;
-    layout = { kind: 'tiled', tileWidth: tw, tileHeight: th };
-  } else {
-    const stripCount = image.stripCount;
-    const stripHeight = stripCount > 0 ? Math.ceil(height / stripCount) : height;
-    layout = { kind: 'stripped', stripHeight, imageWidth: width };
-  }
+  // Multi-sample images expose samples as a leading channel axis (CYX), which
+  // is the canonical OME-NGFF order. Chunky segments are de-interleaved on read.
+  const activeAxes: PlainAxisName[] = samplesPerPixel > 1 ? ['c', 'y', 'x'] : ['y', 'x'];
 
-  // Determine axes from SamplesPerPixel and PlanarConfiguration
-  let activeAxes: PlainAxisName[];
-  if (samplesPerPixel === 1) {
-    // Grayscale — simple 2D
-    activeAxes = ['y', 'x'];
-  } else if (planarConfig === PlanarConfiguration.Contig) {
-    // Chunky interleaved (e.g. RGB stored as RGBRGB...) — YXS
-    activeAxes = ['y', 'x', 's'];
-  } else {
-    // Planar — separate IFDs per channel — CYX
-    activeAxes = ['c', 'y', 'x'];
-  }
-
-  // Check for SubIFDs (pyramidal)
+  // SubIFDs hold the pyramid levels, if any.
   const subIfds = (await image.fetch(TiffTag.SubIFDs)) as number[] | null;
   const numResolutions = subIfds ? subIfds.length + 1 : 1;
+  const resolveLevel = createSubIfdResolver(tiff);
+  const levelImages = await Promise.all(
+    Array.from({ length: numResolutions }, (_, r) => resolveLevel(image, r)),
+  );
 
+  const resolutions = levelImages.map((levelImage) => {
+    const layout = getSegmentLayout(levelImage);
+    const encoding = planChunkEncoding(levelImage, layout, {
+      isLittleEndian: tiff.isLittleEndian,
+      samplesPerPixel: planar ? 1 : samplesPerPixel,
+    });
+    const shape = activeAxes.map((axis) => {
+      if (axis === 'y') return layout.height;
+      if (axis === 'x') return layout.width;
+      return samplesPerPixel; // 'c'
+    });
+    const chunkShape = activeAxes.map((axis) => {
+      if (axis === 'y') return layout.segmentHeight;
+      if (axis === 'x') return layout.segmentWidth;
+      return planar ? 1 : samplesPerPixel; // 'c'
+    });
+    return {
+      image: levelImage,
+      layout,
+      encoding,
+      shape,
+      chunkShape,
+      zarrJson: arrayZarrJson({ shape, chunkShape, dataType, codecs: encoding.codecs }),
+    };
+  });
+
+  const base = resolutions[0].layout;
+  const model = omeroModel(image.value(TiffTag.Photometric), samplesPerPixel);
   const ome = {
     version: '0.5',
     multiscales: [
       {
-        datasets: Array.from({ length: numResolutions }, (_, i) => {
-          const scaleFactor = Math.pow(2, i);
-          return {
-            path: i.toString(),
-            coordinateTransformations: [{
-              type: 'scale',
-              scale: activeAxes.map((axis) => {
-                if (axis === 'y' || axis === 'x') return scaleFactor;
-                return 1.0;
-              }),
-            }],
-          };
-        }),
-        axes: activeAxes.map((name) => {
-          if (name === 'c') return { name: 'c', type: 'channel' };
-          if (name === 's') return { name: 's', type: 'space' };
-          return { name, type: 'space' };
-        }),
+        datasets: resolutions.map(({ layout }, i) => ({
+          path: i.toString(),
+          coordinateTransformations: [{
+            type: 'scale',
+            scale: activeAxes.map((axis) => {
+              if (axis === 'y') return levelScaleFactor(base.height, layout.height, i);
+              if (axis === 'x') return levelScaleFactor(base.width, layout.width, i);
+              return 1.0;
+            }),
+          }],
+        })),
+        axes: activeAxes.map((name) => ({ name, type: name === 'c' ? 'channel' : 'space' })),
       },
     ],
-  };
-
-  const subIfdCache = new Map<number, TiffImage>();
-
-  const indexer = async (coords: { c: number }, resolution: number): Promise<TiffImage> => {
-    // For planar TIFFs each channel is a separate IFD in the main chain
-    const baseImageIdx = planarConfig === PlanarConfiguration.Separate ? coords.c : 0;
-    const baseImage = tiff.images[baseImageIdx];
-
-    if (resolution === 0) return baseImage;
-
-    const subIfdOffsets = (await baseImage.fetch(TiffTag.SubIFDs)) as number[];
-    const offset = subIfdOffsets[resolution - 1];
-    const cached = subIfdCache.get(offset);
-    if (cached) return cached;
-
-    const subImage = await loadSubIfd(tiff, offset);
-    subIfdCache.set(offset, subImage);
-    return subImage;
+    ...(model ? { omero: plainOmero(dataType, samplesPerPixel, model) } : {}),
   };
 
   return {
-    layout,
     bytesPerSample,
     samplesPerPixel,
-    predictor,
+    planar,
     activeAxes,
-    indexer,
     root: {
       zarrJson: encodeJson({
         zarr_format: 3,
@@ -134,65 +159,13 @@ async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
         attributes: { ome },
       }),
     },
-    resolutions: Array.from({ length: numResolutions }, (_, resolution) => {
-      const scaledHeight = height >> resolution;
-      const scaledWidth = width >> resolution;
-
-      // Chunk shape depends on layout and axis convention
-      let chunkShape: number[];
-      if (layout.kind === 'tiled') {
-        const tw = layout.tileWidth;
-        const th = layout.tileHeight;
-        chunkShape = activeAxes.map((axis) => {
-          if (axis === 'y') return th;
-          if (axis === 'x') return tw;
-          if (axis === 's') return samplesPerPixel; // all samples in one chunk
-          return 1; // 'c': one plane per chunk
-        });
-      } else {
-        // Stripped: chunk covers full image width and one strip height
-        chunkShape = activeAxes.map((axis) => {
-          if (axis === 'y') return layout.stripHeight;
-          if (axis === 'x') return layout.imageWidth;
-          if (axis === 's') return samplesPerPixel;
-          return 1; // 'c'
-        });
-      }
-
-      const shape = activeAxes.map((axis) => {
-        if (axis === 'y') return scaledHeight;
-        if (axis === 'x') return scaledWidth;
-        if (axis === 's') return samplesPerPixel;
-        return samplesPerPixel; // 'c': number of channels
-      });
-
-      return {
-        sizes: { c: samplesPerPixel, y: scaledHeight, x: scaledWidth },
-        zarrJson: encodeJson({
-          zarr_format: 3,
-          node_type: 'array',
-          shape,
-          data_type: zarrType,
-          chunk_grid: {
-            name: 'regular',
-            configuration: { chunk_shape: chunkShape },
-          },
-          chunk_key_encoding: {
-            name: 'default',
-            configuration: { separator: '/' },
-          },
-          codecs: [{ name: 'bytes', configuration: { endian: 'little' } }],
-          fill_value: 0,
-          attributes: {},
-        }),
-      };
-    }),
+    resolutions,
   };
 }
 
-export class TiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSignal }> {
+export class TiffAsOmeZarrStore implements AsyncReadable {
   #tiff: Tiff;
-  #context: PlainContext | undefined = undefined;
+  #context: Promise<PlainContext> | undefined = undefined;
 
   constructor(tiff: Tiff) {
     this.#tiff = tiff;
@@ -202,83 +175,56 @@ export class TiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSignal }
     return new TiffAsOmeZarrStore(await Tiff.create(new SourceFromAsyncReadable(internal_store)));
   }
 
+  #getContext(): Promise<PlainContext> {
+    this.#context ??= createPlainTiffContext(this.#tiff);
+    return this.#context;
+  }
+
   async get(key: AbsolutePath, options: { signal?: AbortSignal } = {}): Promise<Uint8Array | undefined> {
     const keyResult = parseKey(key);
     if (keyResult.kind === 'unknown') return undefined;
 
-    if (!this.#context) {
-      this.#context = await createPlainTiffContext(this.#tiff);
-    }
+    const context = await this.#getContext();
 
     if (keyResult.kind === 'meta') {
-      if (keyResult.value.kind === 'root') return this.#context.root.zarrJson;
-      return this.#context.resolutions[keyResult.value.value]?.zarrJson;
+      if (keyResult.value.kind === 'root') return context.root.zarrJson;
+      return context.resolutions[keyResult.value.value]?.zarrJson;
     }
 
-    const { layout, bytesPerSample, samplesPerPixel, predictor, activeAxes } = this.#context;
+    const { bytesPerSample, samplesPerPixel, planar, activeAxes } = context;
     const { resolution, chunkCoords } = keyResult;
-    if (!this.#context.resolutions[resolution]) return undefined;
-
-    // Number of bytes per "pixel unit" in the tile/strip data.
-    // For chunky (YXS), all samples are interleaved so multiply by samplesPerPixel.
-    const bytesPerUnit = activeAxes.includes('s') ? bytesPerSample * samplesPerPixel : bytesPerSample;
+    const level = context.resolutions[resolution];
+    if (!level || chunkCoords.length !== activeAxes.length) return undefined;
+    const { image, layout, shape, chunkShape } = level;
+    if (chunkCoords.some((coord, i) => coord >= Math.ceil(shape[i] / chunkShape[i]))) return undefined;
 
     const c = activeAxes.includes('c') ? chunkCoords[activeAxes.indexOf('c')] : 0;
     const yChunk = chunkCoords[activeAxes.indexOf('y')];
     const xChunk = chunkCoords[activeAxes.indexOf('x')];
 
-    const image = await this.#context.indexer({ c }, resolution);
-    const compression = image.value(TiffTag.Compression) ?? 1 as Compression;
-
-    if (layout.kind === 'tiled') {
-      const { tileWidth, tileHeight } = layout;
-      const tile = await image.getTile(xChunk, yChunk, { signal: options.signal });
-      if (!tile) {
-        return new Uint8Array(tileWidth * tileHeight * bytesPerUnit);
-      }
-      return decompressTile(tile, { tileWidth, tileHeight, bytesPerPixel: bytesPerUnit, predictor, isLittleEndian: this.#tiff.isLittleEndian });
-    } else {
-      // Stripped: yChunk is the strip index, xChunk is always 0
-      const { stripHeight, imageWidth } = layout;
-      const strip = await image.getStrip(yChunk);
-      if (!strip) {
-        return new Uint8Array(stripHeight * imageWidth * bytesPerUnit);
-      }
-      return decompressTile(
-        { bytes: strip.bytes, compression },
-        { tileWidth: imageWidth, tileHeight: stripHeight, bytesPerPixel: bytesPerUnit, predictor, isLittleEndian: this.#tiff.isLittleEndian },
-      );
-    }
+    const segmentsPerPlane = layout.segmentsAcross * layout.segmentsDown;
+    const segmentIndex = (planar ? c * segmentsPerPlane : 0) + yChunk * layout.segmentsAcross + xChunk;
+    return readChunk(image, segmentIndex, {
+      encoding: level.encoding,
+      layout,
+      // Number of samples interleaved within each segment.
+      samplesPerPixel: planar ? 1 : samplesPerPixel,
+      bytesPerSample,
+      isLittleEndian: this.#tiff.isLittleEndian,
+      signal: options.signal,
+    });
   }
 
   async getRange(key: AbsolutePath, range: RangeQuery, options: { signal?: AbortSignal } = {}): Promise<Uint8Array | undefined> {
     const data = await this.get(key, options);
-    if (data === undefined) return undefined;
-    if ('suffixLength' in range) {
-      return data.slice(Math.max(0, data.length - range.suffixLength));
-    }
-    return data.slice(range.offset, range.offset + range.length);
+    return data === undefined ? undefined : sliceRange(data, range);
   }
 
   /**
    * Generate Zarr v3 consolidated metadata for this store.
    */
   async getConsolidatedMetadata(): Promise<Record<string, unknown>> {
-    if (!this.#context) {
-      this.#context = await createPlainTiffContext(this.#tiff);
-    }
-    const rootMeta = JSON.parse(new TextDecoder().decode(this.#context.root.zarrJson)) as Record<string, unknown>;
-    const childMeta: Record<string, unknown> = {};
-    for (let i = 0; i < this.#context.resolutions.length; i++) {
-      childMeta[i.toString()] = JSON.parse(new TextDecoder().decode(this.#context.resolutions[i].zarrJson));
-    }
-    return {
-      ...rootMeta,
-      consolidated_metadata: {
-        metadata: childMeta,
-        kind: 'inline',
-        must_understand: false,
-      },
-    };
+    const context = await this.#getContext();
+    return consolidateMetadata(context.root.zarrJson, context.resolutions.map((r) => r.zarrJson));
   }
 }

@@ -129,16 +129,11 @@ async function processFile(file) {
     const source = new FileSource(file);
     const lowerName = file.name.toLowerCase();
     const isOmeTiff = lowerName.endsWith('.ome.tif') || lowerName.endsWith('.ome.tiff');
-    let store;
-    if (isOmeTiff) {
-      store = await OmeTiffAsOmeZarrStore.fromStore(source);
-    } else {
-      try {
-        store = await OmeTiffAsOmeZarrStore.fromStore(source);
-      } catch {
-        store = await TiffAsOmeZarrStore.fromStore(source);
-      }
-    }
+    // OME-XML is parsed lazily on first get(), so fromStore() alone cannot
+    // detect a non-OME TIFF; choose the store from the file extension instead.
+    const store = isOmeTiff
+      ? await OmeTiffAsOmeZarrStore.fromStore(source)
+      : await TiffAsOmeZarrStore.fromStore(source);
 
     // Render thumbnail
     try {

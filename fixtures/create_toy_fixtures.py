@@ -28,8 +28,7 @@ DATA_DIR = "."
 
 TILE_SIZE = 64
 # Number of SubIFDs (pyramid levels beyond the base).
-# OmeTiffAsOmeZarrStore exposes subIfds.length - 1 levels, so with
-# NUM_SUBIFDS=3 the virtual store exposes 2 visible levels (0 and 1).
+# OmeTiffAsOmeZarrStore exposes subIfds.length + 1 levels (4 with NUM_SUBIFDS=3).
 NUM_SUBIFDS = 3
 
 

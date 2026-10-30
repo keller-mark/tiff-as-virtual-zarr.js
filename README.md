@@ -22,6 +22,13 @@ Run unit tests:
 pnpm run test
 ```
 
+View local demo:
+
+```sh
+pnpm exec vite preview --config demo/vite.config.js
+# Open http://localhost:4173/tiff-as-virtual-zarr.js/
+```
+
 Publish:
 
 ```sh

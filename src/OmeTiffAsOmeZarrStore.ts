@@ -22,10 +22,27 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
-import { Predictor, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
+import { SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
 import { SourceFromAsyncReadable } from "./SourceFromAsyncReadable.js";
-import { assert, AssertionError, encodeJson, parseKey, decompressTile, loadSubIfd, getTileSize } from "./tiff-utils.js";
+import {
+  assert,
+  AssertionError,
+  arrayZarrJson,
+  consolidateMetadata,
+  createSubIfdResolver,
+  defaultWindow,
+  encodeJson,
+  getSegmentLayout,
+  levelScaleFactor,
+  parseKey,
+  planChunkEncoding,
+  readChunk,
+  sampleFormatToZarrType,
+  sliceRange,
+  type ChunkEncoding,
+  type SegmentLayout,
+} from "./tiff-utils.js";
 import type { Ome } from './types.js';
 
 export { assert, AssertionError };
@@ -104,14 +121,79 @@ function omeTiffTypeToZarrType(omeType: string): string {
     float: 'float32',
     double: 'float64',
   };
-  return typeMap[omeType.toLowerCase()] ?? omeType;
+  const zarrType = typeMap[omeType.toLowerCase()];
+  assert(zarrType, `Unsupported OME-XML pixel type: ${omeType}`);
+  return zarrType;
 }
 
+/**
+ * OME-XML UnitsLength symbols → OME-NGFF unit names. Units without an
+ * OME-NGFF equivalent (pixel, reference frame, thou, li, ua, ly, pt) are
+ * absent and therefore omitted from the axes.
+ */
+const OME_TO_NGFF_LENGTH_UNITS: Record<string, string> = {
+  Ym: 'yottameter',
+  Zm: 'zettameter',
+  Em: 'exameter',
+  Pm: 'petameter',
+  Tm: 'terameter',
+  Gm: 'gigameter',
+  Mm: 'megameter',
+  km: 'kilometer',
+  hm: 'hectometer',
+  dam: 'decameter',
+  m: 'meter',
+  dm: 'decimeter',
+  cm: 'centimeter',
+  mm: 'millimeter',
+  'µm': 'micrometer', // U+00B5 MICRO SIGN
+  'μm': 'micrometer', // U+03BC GREEK SMALL LETTER MU
+  um: 'micrometer',
+  nm: 'nanometer',
+  pm: 'picometer',
+  fm: 'femtometer',
+  am: 'attometer',
+  zm: 'zeptometer',
+  ym: 'yoctometer',
+  'Å': 'angstrom',
+  in: 'inch',
+  ft: 'foot',
+  yd: 'yard',
+  mi: 'mile',
+  pc: 'parsec',
+};
+
+/**
+ * Physical pixel size and OME-NGFF unit for one spatial axis. OME-XML defaults
+ * the unit to µm when a physical size is given without one.
+ */
+function physicalSize(pixelsAttrs: Record<string, string> | undefined, axis: 'X' | 'Y' | 'Z') {
+  const size = Number(pixelsAttrs?.[`PhysicalSize${axis}`]);
+  const valid = !Number.isNaN(size) && size > 0;
+  const omeUnit = pixelsAttrs?.[`PhysicalSize${axis}Unit`] ?? 'µm';
+  return {
+    scale: valid ? size : 1.0,
+    unit: valid ? OME_TO_NGFF_LENGTH_UNITS[omeUnit] : undefined,
+  };
+}
+
+function asArray<T>(value: T | T[] | undefined): T[] {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+type Level = {
+  layout: SegmentLayout;
+  encoding: ChunkEncoding;
+  shape: number[];
+  chunkShape: number[];
+  zarrJson: Uint8Array;
+};
+
 type Context = {
-  tileSize: number;
-  bytesPerPixel: number;
-  predictor: Predictor;
+  bytesPerSample: number;
   activeAxes: AxisName[];
+  sizes: { t: number; c: number; z: number };
   indexer(
     coords: {
       z: number;
@@ -123,10 +205,7 @@ type Context = {
   root: {
     zarrJson: Uint8Array;
   };
-  resolutions: Array<{
-    sizes: { t: number; c: number; z: number; y: number; x: number };
-    zarrJson: Uint8Array;
-  }>;
+  resolutions: Level[];
 };
 
 async function resolveMetadata(tiff: Tiff) {
@@ -139,48 +218,59 @@ async function resolveMetadata(tiff: Tiff) {
   // biome-ignore lint/suspicious/noExplicitAny: proper validation later
   const xml = parseXml(raw) as Record<string, any>;
 
-  const name = xml?.Image?.attr?.Name ?? "unknown";
+  // Only the first image (series) of multi-image OME-TIFFs is exposed.
+  const omeImage = asArray(xml?.Image)[0];
+  const pixelsAttrs = omeImage?.Pixels?.attr as Record<string, string> | undefined;
+
+  const name = omeImage?.attr?.Name ?? "unknown";
   assert(typeof name === "string");
 
-  const physicalSizeX = Number(xml.Image?.Pixels?.attr?.PhysicalSizeX);
-  const physicalSizeXUnit = xml.Image?.Pixels?.attr?.PhysicalSizeXUnit as string | undefined;
-  const physicalSizeY = Number(xml.Image?.Pixels?.attr?.PhysicalSizeY);
-  const physicalSizeYUnit = xml.Image?.Pixels?.attr?.PhysicalSizeYUnit as string | undefined;
-
-  const sizeT = Number(xml.Image?.Pixels?.attr?.SizeT);
-  const sizeC = Number(xml.Image?.Pixels?.attr?.SizeC);
-  const sizeZ = Number(xml.Image?.Pixels?.attr?.SizeZ);
-  const sizeY = Number(xml.Image?.Pixels?.attr?.SizeY);
-  const sizeX = Number(xml.Image?.Pixels?.attr?.SizeX);
+  const sizeT = Number(pixelsAttrs?.SizeT);
+  const sizeC = Number(pixelsAttrs?.SizeC);
+  const sizeZ = Number(pixelsAttrs?.SizeZ);
   assert(
-    !Number.isNaN(sizeT) &&
-      !Number.isNaN(sizeC) &&
-      !Number.isNaN(sizeZ) &&
-      !Number.isNaN(sizeY) &&
-      !Number.isNaN(sizeX),
+    [sizeT, sizeC, sizeZ].every((size) => Number.isInteger(size) && size >= 1),
+    "OME-XML SizeT/SizeC/SizeZ must be positive integers",
+  );
+
+  const dimensionOrder = pixelsAttrs?.DimensionOrder;
+  assert(typeof dimensionOrder === "string");
+
+  const interleaved = pixelsAttrs?.Interleaved;
+  assert(interleaved === "false" || interleaved === undefined, "Interleaved OME-TIFFs are not supported");
+  assert((image.value(TiffTag.SamplesPerPixel) ?? 1) === 1, "OME-TIFFs with SamplesPerPixel > 1 are not supported");
+
+  const dataTypeAttr = pixelsAttrs?.Type;
+  assert(typeof dataTypeAttr === "string");
+  const dataType = omeTiffTypeToZarrType(dataTypeAttr);
+
+  const bitsPerSampleArr = image.value(TiffTag.BitsPerSample);
+  const bitsPerSample = bitsPerSampleArr ? bitsPerSampleArr[0] : 8;
+  const sampleFormatArr = image.value(TiffTag.SampleFormat);
+  const sampleFormat = sampleFormatArr ? sampleFormatArr[0] : SampleFormat.Uint;
+  assert(
+    sampleFormatToZarrType(bitsPerSample, sampleFormat) === dataType,
+    `OME-XML pixel type ${dataTypeAttr} does not match TIFF BitsPerSample/SampleFormat`,
   );
 
   let omero: Ome.Omero | undefined = undefined;
-  if (Array.isArray(xml?.Image?.Pixels?.Channel) && xml.Image.Pixels.Channel.length === sizeC) {
+  const channels = asArray(omeImage?.Pixels?.Channel) as Array<{ attr?: { Name?: string; Color?: string } }>;
+  if (channels.length === sizeC) {
+    const window = defaultWindow(dataType);
     omero = {
       id: 1,
       version: "0.1",
       name: name,
-      channels: xml.Image.Pixels.Channel.map(
-        (entry: { attr: { Name: string; Color?: string } }, i: number) =>
+      channels: channels.map(
+        (entry, i) =>
           ({
             active: i < 6,
-            label: entry.attr.Name,
-            color: entry.attr.Color ? intToHexColor(Number(entry.attr.Color)) : CYMRGB[i % CYMRGB.length],
+            label: entry.attr?.Name,
+            color: entry.attr?.Color ? intToHexColor(Number(entry.attr.Color)) : CYMRGB[i % CYMRGB.length].slice(1),
             coefficient: 1,
             family: "linear",
             inverted: false,
-            window: {
-              min: 0,
-              max: 65535,
-              start: 0,
-              end: 65535,
-            },
+            window: { ...window },
           }) satisfies Ome.Channel,
       ),
       rdefs: {
@@ -189,25 +279,11 @@ async function resolveMetadata(tiff: Tiff) {
     };
   }
 
-  const dimensionOrder = xml.Image?.Pixels?.attr?.DimensionOrder;
-  assert(typeof dimensionOrder === "string");
-
-  const interleaved = xml.Image?.Pixels?.attr?.Interleaved;
-  assert(interleaved === "false" || interleaved === undefined);
-
-  const dataType = xml.Image?.Pixels?.attr?.Type;
-  // Zarr will tell us if we have a supported dtype or not
-  assert(typeof dataType === "string");
-
-  const bitsPerSample = image.value(TiffTag.BitsPerSample);
-  const bytesPerPixel = bitsPerSample ? bitsPerSample[0] / 8 : 1;
-  const predictor = image.value(TiffTag.Predictor) ?? Predictor.None;
-
-  const sizes = { t: sizeT, c: sizeC, z: sizeZ, y: sizeY, x: sizeX };
+  const sizes = { t: sizeT, c: sizeC, z: sizeZ };
   let resolutions: number;
   if (subIfds) {
     // Modern bioformats 6+: sub-IFDs on each base image hold the pyramid levels.
-    resolutions = subIfds.length - 1;
+    resolutions = subIfds.length + 1;
   } else {
     // Legacy bioformats (<6): pyramid levels are stored as sequential IFDs after
     // the base-resolution IFDs.  The main IFD chain has ifdPerLevel * numLevels
@@ -216,43 +292,82 @@ async function resolveMetadata(tiff: Tiff) {
     resolutions = Math.max(1, Math.floor(tiff.images.length / ifdPerLevel));
   }
   return {
-    raw,
     dimensionOrder,
-    dataType: omeTiffTypeToZarrType(dataType),
-    name,
+    dataType,
     sizes,
     omero,
     resolutions,
     isLegacy: !subIfds,
-    tileSize: getTileSize(image),
-    bytesPerPixel,
-    predictor,
+    bytesPerSample: bitsPerSample / 8,
     activeAxes: getActiveAxes(sizes),
-    physicalSizeX,
-    physicalSizeY,
-    physicalSizeXUnit,
-    physicalSizeYUnit,
+    physicalSizes: {
+      x: physicalSize(pixelsAttrs, 'X'),
+      y: physicalSize(pixelsAttrs, 'Y'),
+      z: physicalSize(pixelsAttrs, 'Z'),
+    },
   };
 }
 
 async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
   const meta = await resolveMetadata(tiff);
-  const { activeAxes } = meta;
+  const { activeAxes, physicalSizes } = meta;
 
-  // Spatial scale at base resolution (from physical size, defaulting to 1.0)
-  const baseScaleY = !Number.isNaN(meta.physicalSizeY) && meta.physicalSizeY > 0 ? meta.physicalSizeY : 1.0;
-  const baseScaleX = !Number.isNaN(meta.physicalSizeX) && meta.physicalSizeX > 0 ? meta.physicalSizeX : 1.0;
+  const ifdPerLevel = meta.sizes.t * meta.sizes.c * meta.sizes.z;
+  const resolveSubIfd = createSubIfdResolver(tiff);
+  const indexer = async (coords: { z: number; c: number; t: number }, resolution: number) => {
+    const baseIfdIndex = getRelativeOmeIfdIndex(coords, meta);
+    if (meta.isLegacy) {
+      // Legacy bioformats (<6): pyramid levels are sequential IFDs after the
+      // base-resolution block.
+      return tiff.images[baseIfdIndex + resolution * ifdPerLevel];
+    }
+    return resolveSubIfd(tiff.images[baseIfdIndex], resolution);
+  };
 
+  // Level geometry and chunk encoding come from the IFDs of the first plane.
+  const levelImages = await Promise.all(
+    Array.from({ length: meta.resolutions }, (_, r) => indexer({ t: 0, c: 0, z: 0 }, r)),
+  );
+  const layouts = levelImages.map((image) => getSegmentLayout(image));
+  const resolutions: Level[] = layouts.map((layout, r) => {
+    const encoding = planChunkEncoding(levelImages[r], layout, {
+      isLittleEndian: tiff.isLittleEndian,
+      samplesPerPixel: 1,
+    });
+    const shape = activeAxes.map((axis) => {
+      switch (axis) {
+        case 't': return meta.sizes.t;
+        case 'c': return meta.sizes.c;
+        case 'z': return meta.sizes.z;
+        case 'y': return layout.height;
+        case 'x': return layout.width;
+      }
+    });
+    const chunkShape = activeAxes.map((axis) => {
+      if (axis === 'y') return layout.segmentHeight;
+      if (axis === 'x') return layout.segmentWidth;
+      return 1;
+    });
+    return {
+      layout,
+      encoding,
+      shape,
+      chunkShape,
+      zarrJson: arrayZarrJson({ shape, chunkShape, dataType: meta.dataType, codecs: encoding.codecs }),
+    };
+  });
+
+  const base = layouts[0];
   const ome = {
     version: '0.5',
     omero: meta.omero,
     multiscales: [
       {
-        datasets: Array.from({ length: meta.resolutions }, (_, i) => {
-          const scaleFactor = Math.pow(2, i);
+        datasets: layouts.map((layout, i) => {
           const scale = activeAxes.map((axis) => {
-            if (axis === 'y') return baseScaleY * scaleFactor;
-            if (axis === 'x') return baseScaleX * scaleFactor;
+            if (axis === 'y') return physicalSizes.y.scale * levelScaleFactor(base.height, layout.height, i);
+            if (axis === 'x') return physicalSizes.x.scale * levelScaleFactor(base.width, layout.width, i);
+            if (axis === 'z') return physicalSizes.z.scale;
             return 1.0;
           });
           return {
@@ -263,54 +378,18 @@ async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
         axes: activeAxes.map((name) => {
           if (name === 'c') return { name: 'c', type: 'channel' };
           if (name === 't') return { name: 't', type: 'time' };
-          if (name === 'z') return { name: 'z', type: 'space' };
-          if (name === 'y') return {
-            name: 'y',
-            type: 'space',
-            ...(meta.physicalSizeYUnit ? { unit: meta.physicalSizeYUnit } : {}),
-          };
-          // 'x'
-          return {
-            name: 'x',
-            type: 'space',
-            ...(meta.physicalSizeXUnit ? { unit: meta.physicalSizeXUnit } : {}),
-          };
+          const { unit } = physicalSizes[name];
+          return { name, type: 'space', ...(unit ? { unit } : {}) };
         }),
       },
     ],
   };
 
-  const subIfdCache = new Map<number, TiffImage>();
-  const ifdPerLevel = meta.sizes.t * meta.sizes.c * meta.sizes.z;
   return {
-    tileSize: meta.tileSize,
-    bytesPerPixel: meta.bytesPerPixel,
-    predictor: meta.predictor,
+    bytesPerSample: meta.bytesPerSample,
     activeAxes,
-    async indexer(coords: { z: number; c: number; t: number }, resolution: number) {
-      const baseIfdIndex = getRelativeOmeIfdIndex(coords, meta);
-      const baseImage = tiff.images[baseIfdIndex];
-
-      // It's the highest resolution, no need to look up SubIFDs.
-      if (resolution === 0) {
-        return baseImage;
-      }
-
-      if (meta.isLegacy) {
-        // Legacy bioformats (<6): pyramid levels are sequential IFDs after the
-        // base-resolution block.
-        return tiff.images[baseIfdIndex + resolution * ifdPerLevel];
-      }
-
-      const subIfdOffsets = (await baseImage.fetch(TiffTag.SubIFDs)) as number[];
-      const offset = subIfdOffsets[resolution - 1];
-      const cached = subIfdCache.get(offset);
-      if (cached) return cached;
-
-      const subImage = await loadSubIfd(tiff, offset);
-      subIfdCache.set(offset, subImage);
-      return subImage;
-    },
+    sizes: meta.sizes,
+    indexer,
     root: {
       zarrJson: encodeJson({
         zarr_format: 3,
@@ -318,50 +397,13 @@ async function createVirtualZarrMetadata(tiff: Tiff): Promise<Context> {
         attributes: { ome },
       }),
     },
-    resolutions: Array.from({ length: meta.resolutions }, (_, resolution) => {
-      const shape = activeAxes.map((axis) => {
-        switch (axis) {
-          case 't': return meta.sizes.t;
-          case 'c': return meta.sizes.c;
-          case 'z': return meta.sizes.z;
-          case 'y': return meta.sizes.y >> resolution;
-          case 'x': return meta.sizes.x >> resolution;
-        }
-      });
-      const chunkShape = activeAxes.map((axis) =>
-        (axis === 'y' || axis === 'x') ? meta.tileSize : 1
-      );
-      return {
-        sizes: {
-          ...meta.sizes,
-          y: meta.sizes.y >> resolution,
-          x: meta.sizes.x >> resolution,
-        },
-        zarrJson: encodeJson({
-          zarr_format: 3,
-          node_type: "array",
-          shape,
-          data_type: meta.dataType,
-          chunk_grid: {
-            name: "regular",
-            configuration: { chunk_shape: chunkShape },
-          },
-          chunk_key_encoding: {
-            name: "default",
-            configuration: { separator: "/" },
-          },
-          codecs: [{ name: "bytes", configuration: { endian: "little" } }],
-          fill_value: 0,
-          attributes: {},
-        }),
-      };
-    }),
+    resolutions,
   };
 }
 
-export class OmeTiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSignal }> {
+export class OmeTiffAsOmeZarrStore implements AsyncReadable {
   #tiff: Tiff;
-  #context: Context | undefined = undefined;
+  #context: Promise<Context> | undefined = undefined;
 
   constructor(tiff: Tiff) {
     this.#tiff = tiff;
@@ -371,25 +413,32 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSigna
     return new OmeTiffAsOmeZarrStore(await Tiff.create(new SourceFromAsyncReadable(internal_store)));
   }
 
+  #getContext(): Promise<Context> {
+    this.#context ??= createVirtualZarrMetadata(this.#tiff);
+    return this.#context;
+  }
+
   async get(key: AbsolutePath, options: { signal?: AbortSignal } = {}): Promise<Uint8Array | undefined> {
     const keyResult = parseKey(key);
     if (keyResult.kind === "unknown") {
       return undefined;
     }
-    if (!this.#context) {
-      this.#context = await createVirtualZarrMetadata(this.#tiff);
-    }
+    const context = await this.#getContext();
     if (keyResult.kind === "meta") {
       if (keyResult.value.kind === "root") {
-        return this.#context.root.zarrJson;
+        return context.root.zarrJson;
       }
       const resolution = keyResult.value.value;
-      return this.#context.resolutions[resolution]?.zarrJson;
+      return context.resolutions[resolution]?.zarrJson;
     }
-    const { tileSize, bytesPerPixel, predictor, activeAxes } = this.#context;
+    const { bytesPerSample, activeAxes } = context;
     const { resolution, chunkCoords } = keyResult;
-    const sizes = this.#context.resolutions[resolution]?.sizes;
-    if (!sizes) {
+    const level = context.resolutions[resolution];
+    if (!level || chunkCoords.length !== activeAxes.length) {
+      return undefined;
+    }
+    const { shape, chunkShape, layout } = level;
+    if (chunkCoords.some((coord, i) => coord >= Math.ceil(shape[i] / chunkShape[i]))) {
       return undefined;
     }
     // Map chunk coords (in collapsed-axis order) to TIFF t/c/z/y/x
@@ -398,22 +447,25 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSigna
     const z = activeAxes.includes('z') ? chunkCoords[activeAxes.indexOf('z')] : 0;
     const y = chunkCoords[activeAxes.indexOf('y')];
     const x = chunkCoords[activeAxes.indexOf('x')];
-    const image = await this.#context.indexer({ t, c, z }, resolution);
-    const tile = await image.getTile(x, y, { signal: options.signal });
-    if (!tile) {
-      // Sparse / empty tile — return zeros
-      return new Uint8Array(tileSize * tileSize * bytesPerPixel);
-    }
-    return decompressTile(tile, { tileWidth: tileSize, tileHeight: tileSize, bytesPerPixel, predictor, isLittleEndian: this.#tiff.isLittleEndian });
+    const image = await context.indexer({ t, c, z }, resolution);
+    const planeLayout = getSegmentLayout(image);
+    assert(
+      planeLayout.segmentWidth === layout.segmentWidth && planeLayout.segmentHeight === layout.segmentHeight,
+      `IFD ${image.id} segment size differs from the first plane of level ${resolution}`,
+    );
+    return readChunk(image, y * layout.segmentsAcross + x, {
+      encoding: level.encoding,
+      layout,
+      samplesPerPixel: 1,
+      bytesPerSample,
+      isLittleEndian: this.#tiff.isLittleEndian,
+      signal: options.signal,
+    });
   }
 
   async getRange(key: AbsolutePath, range: RangeQuery, options: { signal?: AbortSignal } = {}): Promise<Uint8Array | undefined> {
     const data = await this.get(key, options);
-    if (data === undefined) return undefined;
-    if ('suffixLength' in range) {
-      return data.slice(Math.max(0, data.length - range.suffixLength));
-    }
-    return data.slice(range.offset, range.offset + range.length);
+    return data === undefined ? undefined : sliceRange(data, range);
   }
 
   /**
@@ -423,22 +475,8 @@ export class OmeTiffAsOmeZarrStore implements AsyncReadable<{ signal: AbortSigna
    * that embeds the array metadata for every resolution level.
    */
   async getConsolidatedMetadata(): Promise<Record<string, unknown>> {
-    if (!this.#context) {
-      this.#context = await createVirtualZarrMetadata(this.#tiff);
-    }
-    const rootMeta = JSON.parse(new TextDecoder().decode(this.#context.root.zarrJson)) as Record<string, unknown>;
-    const childMeta: Record<string, unknown> = {};
-    for (let i = 0; i < this.#context.resolutions.length; i++) {
-      childMeta[i.toString()] = JSON.parse(new TextDecoder().decode(this.#context.resolutions[i].zarrJson));
-    }
-    return {
-      ...rootMeta,
-      consolidated_metadata: {
-        metadata: childMeta,
-        kind: "inline",
-        must_understand: false,
-      },
-    };
+    const context = await this.#getContext();
+    return consolidateMetadata(context.root.zarrJson, context.resolutions.map((r) => r.zarrJson));
   }
 }
 
