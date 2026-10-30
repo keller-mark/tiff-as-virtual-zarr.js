@@ -12,7 +12,7 @@ uv run --with awscli aws s3 sync --endpoint-url https://uk1s3.embassy.ebi.ac.uk 
 ```
 ## Edge-case fixtures
 
-`create_edge_case_fixtures.py` writes small synthetic TIFF / OME-TIFF files to `edge_cases/`. They cover layouts the IDR-derived fixtures don't: short final strips, predictors 2 and 3 on multi-byte and big-endian data, LZW and zstd, chunky and planar-separate RGB, non-square tiles, ceil-halving pyramids, and Z-stacks with physical sizes. It also writes `edge_cases/reference.zarr`, which holds the expected virtual array for every case and level.
+`create_edge_case_fixtures.py` writes small synthetic TIFF / OME-TIFF files to `edge_cases/`. They cover layouts the IDR-derived fixtures don't: short final strips, predictors 2 and 3 on multi-byte and big-endian data, LZW and zstd, chunky and planar-separate RGB, three non-RGB samples, non-square tiles, ceil-halving pyramids, and Z-stacks with physical sizes. It also writes `edge_cases/reference.zarr`, which holds the expected virtual array for every case and level.
 
 ```sh
 uv run create_edge_case_fixtures.py

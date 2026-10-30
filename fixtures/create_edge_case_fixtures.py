@@ -178,6 +178,12 @@ def main():
                   metadata={"axes": "CYX", "Channel": {"Name": ["A", "B"]}})
     add_ref("ome_stripped", [cyx])
 
+    # ── Three samples that are not RGB (Photometric = MinIsBlack) ──
+    sep3 = rand((3, HEIGHT, WIDTH), "uint8")
+    write_plain("minisblack_3sample", sep3, photometric="minisblack",
+                planarconfig="separate", tile=(32, 32))
+    add_ref("minisblack_3sample", [sep3])
+
     print(f"Wrote edge-case fixtures to {OUT_DIR}/")
 
 

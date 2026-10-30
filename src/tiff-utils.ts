@@ -1,4 +1,4 @@
-import { Compression, Predictor, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
+import { Compression, Photometric, Predictor, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
 import { decompress } from "@developmentseed/lzw-tiff-decoder";
 import { registry } from "zarrita";
 import type { AbsolutePath } from '@zarrita/storage';
@@ -79,6 +79,20 @@ export function defaultWindow(dataType: string): { min: number; max: number; sta
     ? [0, 2 ** bits - 1]
     : [-(2 ** (bits - 1)), 2 ** (bits - 1) - 1];
   return { min, max, start: min, end: max };
+}
+
+/**
+ * `omero` rendering model for a plain TIFF. The Photometric tag is
+ * authoritative when present: RGB renders in the color model, anything else
+ * in greyscale. Without it, three samples per pixel are assumed to be RGB;
+ * otherwise the model is unknown and no `omero` metadata is emitted.
+ */
+export function omeroModel(
+  photometric: Photometric | null,
+  samplesPerPixel: number,
+): 'color' | 'greyscale' | undefined {
+  if (photometric != null) return photometric === Photometric.Rgb ? 'color' : 'greyscale';
+  return samplesPerPixel === 3 ? 'color' : undefined;
 }
 
 /**

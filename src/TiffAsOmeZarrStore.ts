@@ -1,14 +1,17 @@
 import { PlanarConfiguration, SampleFormat, Tiff, type TiffImage, TiffTag } from "@cogeotiff/core";
 import type { AsyncReadable, AbsolutePath, RangeQuery } from '@zarrita/storage';
 import { SourceFromAsyncReadable } from "./SourceFromAsyncReadable.js";
+import { CYMRGB } from "./OmeTiffAsOmeZarrStore.js";
 import {
   assert,
   arrayZarrJson,
   consolidateMetadata,
   createSubIfdResolver,
+  defaultWindow,
   encodeJson,
   getSegmentLayout,
   levelScaleFactor,
+  omeroModel,
   parseKey,
   planChunkEncoding,
   readChunk,
@@ -17,6 +20,7 @@ import {
   type ChunkEncoding,
   type SegmentLayout,
 } from "./tiff-utils.js";
+import type { Ome } from './types.js';
 
 type PlainAxisName = 'c' | 'y' | 'x';
 
@@ -35,6 +39,33 @@ type PlainContext = {
     zarrJson: Uint8Array;
   }>;
 };
+
+const RGB_CHANNELS = [['R', 'FF0000'], ['G', '00FF00'], ['B', '0000FF']];
+
+function plainOmero(dataType: string, samplesPerPixel: number, model: 'color' | 'greyscale'): Ome.Omero {
+  const window = defaultWindow(dataType);
+  return {
+    id: 1,
+    version: '0.1',
+    channels: Array.from({ length: samplesPerPixel }, (_, i) => {
+      // In the color model the first three samples are R, G, B; any extra
+      // samples (e.g. alpha) are inactive.
+      const rgb = model === 'color' ? RGB_CHANNELS[i] : undefined;
+      return {
+        active: i < (model === 'color' ? 3 : 6),
+        label: rgb?.[0],
+        color: rgb?.[1] ?? (samplesPerPixel === 1 ? 'FFFFFF' : CYMRGB[i % CYMRGB.length].slice(1)),
+        coefficient: 1,
+        family: 'linear',
+        inverted: false,
+        window: { ...window },
+      } satisfies Ome.Channel;
+    }),
+    rdefs: {
+      model,
+    },
+  };
+}
 
 async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
   const image = tiff.images[0];
@@ -94,6 +125,7 @@ async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
   });
 
   const base = resolutions[0].layout;
+  const model = omeroModel(image.value(TiffTag.Photometric), samplesPerPixel);
   const ome = {
     version: '0.5',
     multiscales: [
@@ -112,6 +144,7 @@ async function createPlainTiffContext(tiff: Tiff): Promise<PlainContext> {
         axes: activeAxes.map((name) => ({ name, type: name === 'c' ? 'channel' : 'space' })),
       },
     ],
+    ...(model ? { omero: plainOmero(dataType, samplesPerPixel, model) } : {}),
   };
 
   return {
