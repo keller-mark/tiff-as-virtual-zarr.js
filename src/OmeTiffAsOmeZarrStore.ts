@@ -208,13 +208,33 @@ type Context = {
   resolutions: Level[];
 };
 
+/**
+ * Read the ImageDescription tag (OME-XML) as a UTF-8 string.
+ *
+ * cogeotiff decodes ASCII tags as Latin-1 and unconditionally drops the last
+ * byte, assuming it is a NUL terminator. Some writers (e.g. tifffile 2020.x)
+ * omit the terminator, so the closing `>` of `</OME>` gets cut off. Chrome and
+ * xmldom tolerate that, but Firefox's DOMParser returns a <parsererror>
+ * document. So read the tag's raw bytes ourselves when they live out-of-line.
+ */
+async function readImageDescription(tiff: Tiff, image: TiffImage): Promise<string> {
+  const tag = image.tags.get(TiffTag.ImageDescription);
+  let bytes: Uint8Array;
+  if (tag?.type === "lazy") {
+    bytes = new Uint8Array(await tiff.source.fetch(tag.dataOffset, tag.count));
+  } else {
+    // Short inline value (or missing tag): fall back to cogeotiff's decoding.
+    const rawLatin1 = String((await image.fetch(TiffTag.ImageDescription)) ?? "");
+    bytes = Uint8Array.from(rawLatin1, (c) => c.charCodeAt(0));
+  }
+  // OME-XML is UTF-8, so multibyte characters like µ must be decoded as such.
+  return new TextDecoder("utf-8").decode(bytes).replace(/\u0000+$/, "");
+}
+
 async function resolveMetadata(tiff: Tiff) {
   const image = tiff.images[0];
   const subIfds = (await image.fetch(TiffTag.SubIFDs)) as number[] | null;
-  // cogeotiff decodes ASCII tags with String.fromCharCode (Latin-1), but OME-XML is UTF-8.
-  // Re-encode as bytes and decode as UTF-8 so multibyte characters like µ are correct.
-  const rawLatin1 = String(await image.fetch(TiffTag.ImageDescription));
-  const raw = new TextDecoder("utf-8").decode(Uint8Array.from(rawLatin1, (c) => c.charCodeAt(0)));
+  const raw = await readImageDescription(tiff, image);
   // biome-ignore lint/suspicious/noExplicitAny: proper validation later
   const xml = parseXml(raw) as Record<string, any>;
 
