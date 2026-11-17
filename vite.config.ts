@@ -23,6 +23,13 @@ export default defineConfig(({ mode }) => {
         fileName: () => "index.js",
       },
       rollupOptions: {
+        external: [
+          // zarrita must stay external: we register custom codecs (snappy, brotli)
+          // in zarrita's codec registry, which must be the same registry instance
+          // that the consumer's zarrita uses when reading from the store.
+          // (Consumers need zarrita anyway in order to read from the store.)
+          "zarrita",
+        ],
         output: {
           inlineDynamicImports: !isDynamic,
         },
