@@ -1,15 +1,24 @@
 {
   "name": "tiff-as-virtual-zarr",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "",
   "license": "MIT",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./bundled": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/bundled/index.js"
+    },
+    "./bundled-dynamic": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/bundled-dynamic/index.js"
     }
   },
   "files": [
@@ -17,11 +26,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && vite build && vite build --mode dynamic",
     "test": "pnpm exec vitest --run",
     "generate-fixtures": "bash scripts/download_fixtures.sh",
     "demo:dev": "vite --config demo/vite.config.js",
-    "demo:build": "vite build --config demo/vite.config.js"
+    "demo:build": "vite build --config demo/vite.config.js",
+    "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
     "@chunkd/source": "^11.2.0",
